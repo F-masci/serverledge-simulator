@@ -1,0 +1,13 @@
+# Editor
+.vscode/
+
+# Cache Python
+__pycache__/
+
+# Configurazione locale e credenziali
+.env
+.env.*
+!.env.example
+
+# Documentazione locale
+/refs/
