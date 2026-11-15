@@ -8,6 +8,7 @@ __pycache__/
 .env
 .env.*
 !.env.example
+environment.yml
 
 # Documentazione locale
 /refs/
