@@ -2,12 +2,12 @@
 
 from enum import IntEnum
 from hashlib import sha256
-from numbers import Integral
 import platform
 import struct
 
 import numpy as np
 from numpy.random import Generator, PCG64DXSM, SeedSequence
+from sim.validation import nonnegative_integer
 
 
 class StreamKind(IntEnum):
@@ -15,12 +15,6 @@ class StreamKind(IntEnum):
 
     ARRIVAL = 1
     SERVICE = 2
-
-
-def _nonnegative_integer(value: int, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, Integral) or value < 0:
-        raise ValueError(f'{name} deve essere un intero non negativo')
-    return int(value)
 
 
 class RandomStreams:
@@ -34,8 +28,8 @@ class RandomStreams:
     SCHEMA_VERSION = 1
 
     def __init__(self, seed: int, replication: int = 0) -> None:
-        self._seed = _nonnegative_integer(seed, 'seed')
-        self._replication = _nonnegative_integer(replication, 'replication')
+        self._seed = nonnegative_integer(seed, 'seed')
+        self._replication = nonnegative_integer(replication, 'replication')
         self._streams: dict[tuple[StreamKind, str], Generator] = {}
 
     def stream(self, kind: StreamKind, stream_id: str) -> Generator:

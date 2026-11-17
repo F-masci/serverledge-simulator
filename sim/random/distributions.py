@@ -1,15 +1,10 @@
 """Distribuzioni dei tempi, separate dalle configurazioni delle funzioni."""
 
 from abc import ABC, abstractmethod
-import math
+
+from sim.validation import positive_number
 
 from .streams import RandomStreams, StreamKind
-
-
-def _positive(value: float, name: str) -> float:
-    if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
-        raise ValueError(f'{name} deve essere finito e positivo')
-    return float(value)
 
 
 class ArrivalProcess(ABC):
@@ -22,8 +17,8 @@ class PoissonArrivalProcess(ArrivalProcess):
     """Arrivi Poisson omogenei con tasso espresso in richieste al secondo."""
 
     def __init__(self, rate: float, streams: RandomStreams, stream_id: str) -> None:
-        self._rate = _positive(rate, 'rate')
-        self._scale = _positive(1 / self._rate, 'interarrivo medio')
+        self._rate = positive_number(rate, 'rate')
+        self._scale = positive_number(1 / self._rate, 'interarrivo medio')
         self._rng = streams.stream(StreamKind.ARRIVAL, stream_id)
 
     @property
@@ -50,10 +45,10 @@ class GammaServiceTime(ServiceTime):
     def __init__(
         self, mean: float, scv: float, streams: RandomStreams, stream_id: str,
     ) -> None:
-        self._mean = _positive(mean, 'mean')
-        self._scv = _positive(scv, 'scv')
-        self._shape = _positive(1 / self._scv, 'shape')
-        self._scale = _positive(self._mean * self._scv, 'scale')
+        self._mean = positive_number(mean, 'mean')
+        self._scv = positive_number(scv, 'scv')
+        self._shape = positive_number(1 / self._scv, 'shape')
+        self._scale = positive_number(self._mean * self._scv, 'scale')
         self._rng = streams.stream(StreamKind.SERVICE, stream_id)
 
     @property
