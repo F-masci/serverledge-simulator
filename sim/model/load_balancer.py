@@ -2,7 +2,7 @@
 
 from collections.abc import Iterable
 
-from .architecture_ring import ArchitectureRing
+from .ring import ArchitectureRing
 from .request import Request
 
 

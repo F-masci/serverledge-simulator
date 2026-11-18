@@ -42,7 +42,7 @@ class DockerContainer:
 
     @property
     def expiration_time(self) -> float | None:
-        """Tempo simulato in secondi; nel codice Go è UnixNano."""
+        """Tempo simulato in secondi"""
         return self._expiration_time
 
     @property

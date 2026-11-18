@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from types import MappingProxyType
 
 from sim.validation import nonempty_string
-from .architecture_ring import ArchitectureRing
+from .ring import ArchitectureRing
 from .node import Node
 from .request import Request
 from .load_balancer import LoadBalancer

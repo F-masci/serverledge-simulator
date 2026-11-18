@@ -14,7 +14,7 @@ from unittest.mock import patch
 from sim.model.infrastructure import Infrastructure
 from sim.model.request import Request, RequestStatus
 from sim.model.function import Function, BuiltinRuntime
-from sim.model.architecture_ring import ArchitectureRing
+from sim.model.ring import ArchitectureRing
 
 
 def function(name='hello', archs=('amd64', 'arm64')):

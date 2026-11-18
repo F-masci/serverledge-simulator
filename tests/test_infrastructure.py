@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from sim.model.infrastructure import Infrastructure
-from sim.model.architecture_ring import ArchitectureRing
+from sim.model.ring import ArchitectureRing
 from sim.model.function import Function, BuiltinRuntime
 
 
