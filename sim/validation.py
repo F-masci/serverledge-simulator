@@ -20,3 +20,16 @@ def nonnegative_integer(value: int, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, Integral) or value < 0:
         raise ValueError(f'{name} deve essere un intero non negativo')
     return int(value)
+
+
+def nonempty_string(value: str, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f'{name} deve essere una stringa non vuota')
+    return value
+
+
+def positive_integer(value: int, name: str) -> int:
+    value = nonnegative_integer(value, name)
+    if value == 0:
+        raise ValueError(f'{name} deve essere positivo')
+    return value

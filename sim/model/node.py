@@ -3,6 +3,8 @@
 I contatori busy/warm rappresentano prenotazioni, non consumo fisico misurato.
 """
 
+from .request import Request
+
 from dataclasses import dataclass
 from itertools import count
 from types import MappingProxyType
@@ -228,6 +230,22 @@ class Node:
             for container in pool._remove_expired(now):
                 container._destroy()
                 self.resources._release(container.function, idle=True)
+
+    def submit(self, request: Request) -> bool:
+        """Tenta l'ammissione locale dopo la selezione di un ring compatibile.
+
+        Riusa un busy sotto il limite di concorrenza, poi un idle, oppure
+        prenota una nuova creazione. Senza risorse rifiuta: in questo passo
+        la coda locale è disabilitata. Una creazione resta CREATING fino
+        alla notifica esplicita del suo esito, senza esecuzione automatica.
+        """
+        request._ensure_new()
+        container = self.acquire(request.function)
+        if container is None:
+            request._reject('out_of_resources')
+            return False
+        request._accept(self, container, warm=container.state is not ContainerState.CREATING)
+        return True
 
     def __repr__(self) -> str:
         return self.id.key
