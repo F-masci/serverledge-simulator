@@ -14,6 +14,7 @@ class RequestStatus(Enum):
     CREATED = 'created'
     ACCEPTED = 'accepted'
     REJECTED = 'rejected'
+    COMPLETED = 'completed'
 
 
 class Request:
@@ -70,3 +71,10 @@ class Request:
         self._ensure_new()
         self._rejection_reason = reason
         self._status = RequestStatus.REJECTED
+
+    def complete(self, now: float) -> None:
+        """Conclude l'invocazione e aggiorna il container sul nodo assegnato."""
+        if self.status is not RequestStatus.ACCEPTED or self.node is None or self.container is None:
+            raise ValueError('Solo una richiesta accettata può essere completata')
+        self.node.complete(self.container, now)
+        self._status = RequestStatus.COMPLETED

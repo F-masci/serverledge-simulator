@@ -18,8 +18,8 @@ def main() -> None:
         arrivals = nonnegative_integer(args.arrivals, '--arrivals')
         simulation = Simulation(Scenario.load(args.scenario))
         first_arrivals = simulation.start()
-        for _ in range(arrivals):
-            simulation.engine.step()
+        while simulation.arrivals < arrivals and simulation.engine.step():
+            pass
     except (OSError, ValueError) as error:
         parser.error(str(error))
 
@@ -28,7 +28,7 @@ def main() -> None:
     print(f'Arrivi iniziali schedulati: {len(first_arrivals)} (primo a {first_time} s)')
     if arrivals:
         print(f'Arrivi elaborati: {simulation.arrivals}')
-        print(f'Prossimo arrivo: {simulation.engine.next_event_time} s')
+        print(f'Prossimo evento: {simulation.engine.next_event_time} s')
 
 
 if __name__ == '__main__':

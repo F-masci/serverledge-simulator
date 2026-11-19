@@ -215,19 +215,45 @@ class SimulationTest(unittest.TestCase):
             service = Scenario.load(path).get_function('fixed').sampler.service
             self.assertEqual((service.mean, service.scv), (0.25, 0.5))
 
-    def test_arrival_submits_to_node_and_schedules_successor_even_after_rejection(self):
-        """L'ammissione spetta al nodo e uno scarto non interrompe gli arrivi."""
-        function = profiled_function('hello', 2, 4)
+    def test_accepted_arrival_completes_and_releases_resources(self):
+        """Uno scarto lascia in calendario solo il completamento già previsto e il prossimo arrivo."""
+        function = Function('hello', 128, 1, BuiltinRuntime('python314'), profile=FunctionProfile(
+            arrival_rate=1, service_rate=2 / 3, first_arrival_time=0,
+            arrival_distribution='deterministic', service_distribution='deterministic',
+        ))
         target = RecordingInfrastructure()
         target.create_ring('edge', arch='amd64', memory=128, cpus=1)
         node = target.create_node('edge', 'n1', 'edge')
         simulation = Simulation(Scenario((function,)), target)
         simulation.start()
-        simulation.engine.step()
+        engine = simulation.engine
+        engine.step()
         first = target.requests[-1]
         self.assertEqual(first.function, function)
         self.assertIs(first.node, node)
         self.assertIs(first.status, RequestStatus.ACCEPTED)
-        simulation.engine.step()
-        self.assertIs(target.requests[-1].status, RequestStatus.REJECTED)
-        self.assertEqual(simulation.engine.pending_count, 1)
+        self.assertFalse(first.warm)
+        self.assertEqual(node.resources.used_cpus, 1)
+        self.assertEqual(engine.pending_count, 2)
+
+        engine.step()
+        self.assertEqual(engine.now, 1)
+        rejected = target.requests[-1]
+        self.assertIs(rejected.status, RequestStatus.REJECTED)
+        self.assertEqual(engine.pending_count, 2)
+        self.assertEqual(engine.next_event_time, 1.5)
+
+        engine.step()
+        self.assertEqual(engine.now, 1.5)
+        self.assertIs(first.status, RequestStatus.COMPLETED)
+        self.assertIs(rejected.status, RequestStatus.REJECTED)
+        self.assertEqual(node.resources.used_cpus, 0)
+        self.assertEqual(node.resources.warm_pool_used_mem, 128)
+        self.assertEqual(engine.pending_count, 1)
+
+        engine.step()
+        reused = target.requests[-1]
+        self.assertTrue(reused.warm)
+        self.assertIs(reused.container, first.container)
+        engine.run(until=3.5)
+        self.assertIs(reused.status, RequestStatus.COMPLETED)
