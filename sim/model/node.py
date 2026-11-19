@@ -4,11 +4,12 @@ I contatori busy/warm rappresentano prenotazioni, non consumo fisico misurato.
 """
 
 from .request import Request
-from sim.utils.validation import finite_time
+from sim.utils.validation import finite_time, integer
 
 from dataclasses import dataclass
 from itertools import count
 from types import MappingProxyType
+from collections import deque
 from collections.abc import Callable, Iterator, Mapping
 
 from .function import Function
@@ -113,6 +114,7 @@ class Node:
         machine_tag: str | None = None,
         *,
         idle_timeout: float = 600,
+        queue_capacity: int = 0,
     ) -> None:
         self._idle_timeout = finite_time(idle_timeout, 'node.idle_timeout')
         if self._idle_timeout < 0:
@@ -126,6 +128,8 @@ class Node:
         self._resources = Resources(total_memory=memory, total_cpus=cpus)
         self._pools: dict[str, ContainerPool] = {}
         self._pending: dict[DockerContainer, bool] = {}
+        self._queue_capacity = max(0, integer(queue_capacity, 'queue_capacity'))
+        self._queue: deque[Request] = deque()
         self._container_ids = count(1)
         self.on_container_state_change: Callable[[Node, DockerContainer, ContainerState | None], None] | None = None
         self.on_container_idle: Callable[[Node, DockerContainer], None] | None = None
@@ -269,21 +273,40 @@ class Node:
                 self.resources._release(container.function, idle=True)
                 self._notify_container_state(container, ContainerState.IDLE)
 
-    def submit(self, request: Request) -> bool:
+    def submit(self, request: Request, *, reject_on_failure: bool = True) -> bool:
         """Tenta l'ammissione locale dopo la selezione di un ring compatibile.
 
         Riusa un busy sotto il limite di concorrenza, poi un idle, oppure
-        prenota una nuova creazione. Senza risorse rifiuta: in questo passo
-        la coda locale è disabilitata. Una creazione resta CREATING fino
+        prenota una nuova creazione. Il ring può rinviare il rifiuto definitivo
+        per provare altri nodi. Una creazione resta CREATING fino
         alla notifica esplicita del suo esito, senza esecuzione automatica.
         """
         request._ensure_new()
         container = self.acquire(request.function)
         if container is None:
-            request._reject('out_of_resources', node=self)
-            return False
+            return self.enqueue_or_reject(request) if reject_on_failure else False
         request._accept(self, container, warm=container.state is not ContainerState.CREATING)
         return True
+
+    def enqueue_or_reject(self, request: Request) -> bool:
+        """Mette in attesa sul nodo destinatario se resta posto nella FIFO."""
+        if len(self._queue) >= self._queue_capacity:
+            request._reject('out_of_resources', node=self)
+            return False
+        request._enqueue(self)
+        self._queue.append(request)
+        return True
+
+    def dispatch_waiting(self) -> Iterator[Request]:
+        """Dopo un completamento ammette le richieste finché la testa può partire."""
+        while self._queue:
+            request = self._queue[0]
+            container = self.acquire(request.function)
+            if container is None:
+                break
+            self._queue.popleft()
+            request._accept(self, container, warm=container.state is not ContainerState.CREATING)
+            yield request
 
     def __repr__(self) -> str:
         return self.id.key

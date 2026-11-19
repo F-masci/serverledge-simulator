@@ -25,3 +25,5 @@ class CompletionEvent(Event):
         self.request.complete(engine.now)
         if simulation is not None:
             simulation.metrics.record_completion(self.request, engine.now, self.arrival_time)
+            assert self.request.node is not None
+            simulation.dispatch_waiting(self.request.node)

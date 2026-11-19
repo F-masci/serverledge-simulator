@@ -1,5 +1,8 @@
 seed = 12345
 
+[scheduler.queue]
+capacity = 0
+
 [containers]
 idle_timeout = 600.0
 cleanup_interval = 30.0

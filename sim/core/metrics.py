@@ -13,6 +13,9 @@ from sim.utils.welford import TimedWelford, Welford
 
 @dataclass
 class _InvocationMetrics:
+    waiting: int = 0
+    queued: int = 0
+    queue_wait: Welford = field(default_factory=Welford)
     accepted: int = 0
     completed: int = 0
     cold_starts: int = 0
@@ -23,10 +26,13 @@ class _InvocationMetrics:
 
     @property
     def arrivals(self) -> int:
-        return self.accepted + self.rejections.total()
+        return self.waiting + self.accepted + self.rejections.total()
 
     def record_admission(self, request: Request) -> None:
-        if request.status is RequestStatus.ACCEPTED:
+        if request.status is RequestStatus.QUEUED:
+            self.waiting += 1
+            self.queued += 1
+        elif request.status is RequestStatus.ACCEPTED:
             self.accepted += 1
             if request.warm:
                 self.warm_starts += 1
@@ -46,7 +52,10 @@ class _InvocationMetrics:
             'accepted': self.accepted,
             'rejected': self.rejections.total(),
             'completed': self.completed,
-            'pending': self.accepted - self.completed,
+            'pending': self.waiting + self.accepted - self.completed,
+            'waiting': self.waiting,
+            'queued': self.queued,
+            'mean_queue_wait_s': self.queue_wait.mean,
             'cold_starts': self.cold_starts,
             'warm_starts': self.warm_starts,
             'rejections_by_reason': dict(self.rejections),
@@ -221,6 +230,12 @@ class SimulationMetrics:
 
     def record_admission(self, request: Request, now: float) -> None:
         for stats in self._invocations_for(request, now):
+            stats.record_admission(request)
+
+    def record_dequeue(self, request: Request, now: float) -> None:
+        for stats in self._invocations_for(request, now):
+            stats.waiting -= 1
+            stats.queue_wait.add(now - request.arrival_time)
             stats.record_admission(request)
 
     def record_completion(self, request: Request, now: float, arrival_time: float) -> None:

@@ -12,7 +12,7 @@ from sim.model.function import BuiltinRuntime, CustomRuntime, Function, Function
 from sim.model.infrastructure import Infrastructure
 from sim.random.streams import RandomStreams
 from sim.utils.validation import (
-    finite_time, nonempty_string, nonnegative_integer, positive_integer, positive_number,
+    finite_time, integer, nonempty_string, nonnegative_integer, positive_integer, positive_number,
 )
 
 
@@ -41,6 +41,7 @@ class Scenario:
     seed: int = 12345
     function_registry: Mapping[str, Function] = field(init=False, repr=False, compare=False)
     _rings: tuple[_RingSpec, ...]
+    queue_capacity: int
     container_idle_timeout: float
     container_cleanup_interval: float
 
@@ -49,8 +50,18 @@ class Scenario:
         seed: int = 12345,
         *, infrastructure: Mapping[str, object] | None = None,
         containers: Mapping[str, object] | None = None,
+        scheduler: Mapping[str, object] | None = None,
     ) -> None:
         object.__setattr__(self, 'seed', nonnegative_integer(seed, 'seed'))
+        if scheduler is None:
+            scheduler = {}
+        if not isinstance(scheduler, Mapping) or scheduler.keys() - {'queue'}:
+            raise ValueError('scheduler accetta solo queue')
+        queue = scheduler.get('queue', {})
+        if not isinstance(queue, Mapping) or queue.keys() - {'capacity'}:
+            raise ValueError('scheduler.queue accetta solo capacity')
+        capacity = integer(queue.get('capacity', 0), 'scheduler.queue.capacity')
+        object.__setattr__(self, 'queue_capacity', capacity)
         if containers is None:
             containers = {}
         if not isinstance(containers, Mapping) or containers.keys() - {'idle_timeout', 'cleanup_interval', 'startup_times'}:
@@ -109,7 +120,7 @@ class Scenario:
             for node in ring.nodes:
                 infrastructure.create_node(
                     ring.id, node.name, node.area, node.machine_tag,
-                    idle_timeout=self.container_idle_timeout,
+                    idle_timeout=self.container_idle_timeout, queue_capacity=self.queue_capacity,
                 )
         return infrastructure
 
@@ -174,7 +185,7 @@ class Scenario:
             data = reader(source)
         if not isinstance(data, dict):
             raise ValueError('Lo scenario deve essere una tabella')
-        if unknown := data.keys() - {'functions', 'function', 'seed', 'infrastructure', 'containers'}:
+        if unknown := data.keys() - {'functions', 'function', 'seed', 'infrastructure', 'containers', 'scheduler'}:
             raise ValueError(f'Parametri scenario sconosciuti: {sorted(map(str, unknown))}')
 
         if 'function' in data and 'functions' in data:
@@ -188,6 +199,7 @@ class Scenario:
             seed=data.get('seed', 12345),
             infrastructure=data.get('infrastructure'),
             containers=data.get('containers'),
+            scheduler=data.get('scheduler'),
         )
 
     @staticmethod

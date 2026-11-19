@@ -1,6 +1,8 @@
 """Verifiche degli arrivi e del ciclo di vita dei container.
 
-Riferimenti Infrascaler per il ciclo di vita:
+Riferimenti Infrascaler:
+- internal/scheduling/policy_default.go: FIFO opzionale e ripartenza al completamento.
+- internal/scheduling/queue.go: ordine di accodamento e capacità.
 - internal/container/runtimes.go: immagini Docker dei runtime integrati.
 - internal/container/container.go: scelta dell'immagine e copia del codice.
 - internal/node/pool.go: riuso del container e scadenza delle istanze idle.
@@ -223,6 +225,43 @@ class SimulationTest(unittest.TestCase):
             path.write_text(json.dumps({'functions': [definition]}))
             service = Scenario.load(path).get_function('fixed').sampler.service
             self.assertEqual((service.mean, service.scv), (0.25, 0.5))
+
+    def test_configured_fifo_counts_waiting_and_retries_after_completion(self):
+        """La FIFO configurata attende un completamento e scarta quando è piena."""
+        definition = {
+            'scheduler': {'queue': {'capacity': 1}},
+            'functions': [{
+                'name': 'hello', 'runtime': 'python314', 'memory_mb': 128, 'cpu_demand': 1,
+                'arrival_rate': 1, 'service_rate': 0.4, 'first_arrival_time': 0,
+                'arrival_distribution': 'deterministic', 'service_distribution': 'deterministic',
+            }],
+            'infrastructure': {'rings': [{
+                'id': 'edge', 'arch': 'amd64', 'memory_mb': 128, 'cpus': 1,
+                'nodes': [{'name': 'n1', 'area': 'edge'}],
+            }]},
+        }
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / 'fifo.json'
+            path.write_text(json.dumps(definition))
+            simulation = Simulation(Scenario.load(path))
+
+        simulation.start()
+        simulation.engine.run(until=2)
+        totals = simulation.metrics_snapshot()['total']
+        # A t=2 la prima richiesta è attiva, la seconda attende e la terza è scartata.
+        self.assertEqual((totals['arrivals'], totals['accepted'], totals['waiting'], totals['rejected']),
+                         (3, 1, 1, 1))
+        self.assertEqual(totals['pending'], 2)
+        simulation.engine.run(until=2.5)
+        totals = simulation.metrics_snapshot()['total']
+        # Il primo completamento libera il container e avvia la testa con warm start.
+        self.assertEqual((totals['arrivals'], totals['accepted'], totals['waiting'], totals['warm_starts']),
+                         (3, 2, 0, 1))
+        self.assertEqual(totals['mean_queue_wait_s'], 1.5)
+        simulation.engine.run(until=5)
+        totals = simulation.metrics_snapshot()['total']
+        self.assertEqual(totals['completed'], 2)
+        self.assertEqual(totals['mean_response_time_s'], 3.25)
 
     def test_accepted_arrival_completes_and_releases_resources(self):
         """Uno scarto non schedula completamenti e il riuso invalida la vecchia pulizia."""

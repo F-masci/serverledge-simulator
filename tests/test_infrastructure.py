@@ -23,7 +23,7 @@ class InfrastructureTest(unittest.TestCase):
             with patch.object(ring, 'create_node', wraps=ring.create_node) as create:
                 node = infra.create_node('x86-small', 'n1', 'edge', 'cpu')
         create_ring.assert_called_once_with('x86-small')
-        create.assert_called_once_with('n1', 'edge', 'cpu', idle_timeout=600)
+        create.assert_called_once_with('n1', 'edge', 'cpu', idle_timeout=600, queue_capacity=0)
         self.assertIs(infra.rings['x86-small'], ring)
         self.assertIs(infra.create_ring('x86-small', arch='amd64', memory=512, cpus=2), ring)
         self.assertIs(ring.nodes[0], node)

@@ -12,14 +12,18 @@ if TYPE_CHECKING:
 
 class RequestStatus(Enum):
     CREATED = 'created'
+    QUEUED = 'queued'
     ACCEPTED = 'accepted'
     REJECTED = 'rejected'
     COMPLETED = 'completed'
 
 
 class Request:
-    def __init__(self, function: Function, *, service_duration: float | None = None) -> None:
+    def __init__(
+        self, function: Function, *, service_duration: float | None = None, arrival_time: float = 0.0,
+    ) -> None:
         self._function = function
+        self._arrival_time = arrival_time
         self._service_duration = service_duration
         self._status = RequestStatus.CREATED
         self._node = None
@@ -35,6 +39,10 @@ class Request:
     def service_duration(self) -> float | None:
         """Durata di servizio richiesta, in secondi simulati."""
         return self._service_duration
+
+    @property
+    def arrival_time(self) -> float:
+        return self._arrival_time
 
     @property
     def status(self) -> RequestStatus:
@@ -60,8 +68,14 @@ class Request:
         if self.status is not RequestStatus.CREATED:
             raise ValueError('Richiesta già gestita')
 
-    def _accept(self, node: 'Node', container: 'DockerContainer', warm: bool) -> None:
+    def _enqueue(self, node: 'Node') -> None:
         self._ensure_new()
+        self._node = node
+        self._status = RequestStatus.QUEUED
+
+    def _accept(self, node: 'Node', container: 'DockerContainer', warm: bool) -> None:
+        if self.status is not RequestStatus.QUEUED or self.node is not node:
+            self._ensure_new()
         self._node = node
         self._container = container
         self._warm = warm

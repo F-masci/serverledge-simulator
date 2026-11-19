@@ -6,9 +6,10 @@ from math import floor
 
 from sim.io.scenario import Scenario
 from sim.model.container import ContainerState, DockerContainer
-from sim.model.events import ArrivalEvent, ContainerCleanupEvent, ScheduledEvent
+from sim.model.events import ArrivalEvent, CompletionEvent, ContainerCleanupEvent, ContainerReadyEvent, ScheduledEvent
 from sim.model.infrastructure import Infrastructure
 from sim.model.node import Node
+from sim.model.request import Request, RequestStatus
 
 from .engine import SimulationEngine
 from .metrics import SimulationMetrics
@@ -60,6 +61,26 @@ class Simulation:
             first_arrivals.append(self.engine.schedule(profile.first_arrival_time, event))
         self._started = True
         return tuple(first_arrivals)
+
+    def record_submission(self, request: Request) -> None:
+        self.metrics.record_admission(request, self.engine.now)
+        if request.status is RequestStatus.ACCEPTED:
+            self._schedule_execution(request)
+
+    def dispatch_waiting(self, node: Node) -> None:
+        for request in node.dispatch_waiting():
+            self.metrics.record_dequeue(request, self.engine.now)
+            self._schedule_execution(request)
+
+    def _schedule_execution(self, request: Request) -> None:
+        if request.warm:
+            duration = request.service_duration
+            assert duration is not None
+            self.engine.schedule_after(duration, CompletionEvent(request, request.arrival_time))
+        else:
+            self.engine.schedule_after(
+                request.function.cold_start_time, ContainerReadyEvent(request, request.arrival_time),
+            )
 
     def _record_container_state(
         self, node: Node, container: DockerContainer, previous: ContainerState | None,

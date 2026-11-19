@@ -49,7 +49,7 @@ class Infrastructure:
 
     def create_node(
         self, ring_id: str, name: str, area: str, machine_tag: str | None = None,
-        *, idle_timeout: float = 600,
+        *, idle_timeout: float = 600, queue_capacity: int = 0,
     ) -> Node:
         """Ottiene il ring tramite create_ring e gli delega la creazione del nodo.
 
@@ -57,13 +57,13 @@ class Infrastructure:
         del singolo nodo e non possono essere sovrascritte alla creazione.
         """
         ring = self.create_ring(ring_id)
-        return ring.create_node(name, area, machine_tag, idle_timeout=idle_timeout)
+        return ring.create_node(name, area, machine_tag, idle_timeout=idle_timeout, queue_capacity=queue_capacity)
 
     def submit(self, request: Request) -> Node | None:
         """Chiede al bilanciatore il ring e delega a esso l'inoltro al nodo.
 
-        None indica l'assenza di una destinazione; non viene creata una coda
-        nell'infrastruttura e non vengono modificati i pool dei container.
+        Restituisce il nodo che ha ammesso o accodato la richiesta, oppure None
+        se la richiesta è stata rifiutata.
         """
         request._ensure_new()
         ring = self._load_balancer.submit(request, self._rings.values())

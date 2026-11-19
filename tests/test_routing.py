@@ -1,11 +1,8 @@
 """Percorso di inoltro iniziale e compatibilità dell'hashing.
 
-Riferimento Cortese: internal/lb/hashRing.go, hash, HashRing.Add e HashRing.Get;
-internal/lb/architectureAwareLb.go, NewArchitectureAwareBalancer (128 repliche).
-FNV-1a, chiavi nome#indice, successore inclusivo e wrap-around seguono quel codice.
-La selezione del primo ring compatibile e l’ammissione locale senza coda sono
-semplificazioni esplicite: non sono riprodotti MemoryChecker, fallback per
-risorse, MAB o una coda di ammissione finita della piattaforma reale.
+Riferimenti Infrascaler: internal/lb/hashRing.go, hash, HashRing.Add e
+HashRing.Get per l'ordine delle repliche virtuali e la ricerca di altri nodi;
+internal/lb/generalLoadBalancer.go per la selezione del ring.
 """
 
 import unittest
@@ -82,6 +79,26 @@ class RoutingTest(unittest.TestCase):
             with patch.object(ArchitectureRing, '_hash', return_value=query):
                 self.assertIs(ring.select_node(function()), expected)
 
+    def test_fifo_stops_at_blocked_head_and_keeps_arrival_policy(self):
+        """La testa bloccata impedisce il dequeue; un nuovo arrivo tenta subito."""
+        infra = Infrastructure()
+        infra.create_ring('r', arch='amd64', memory=256, cpus=1)
+        node = infra.create_node('r', 'n1', 'edge', queue_capacity=2)
+        active, follower = Request(function()), Request(function())
+        oversized = Request(Function('large', 128, 2, BuiltinRuntime('python314')))
+        self.assertIs(infra.submit(active), node)
+        node.creation_succeeded(active.container, 0)
+        self.assertIs(infra.submit(oversized), node)
+        self.assertIs(infra.submit(follower), node)
+
+        active.complete(1)
+        self.assertEqual(tuple(node.dispatch_waiting()), ())
+        self.assertIs(oversized.status, RequestStatus.QUEUED)
+        self.assertIs(follower.status, RequestStatus.QUEUED)
+        new_arrival = Request(function())
+        self.assertIs(infra.submit(new_arrival), node)
+        self.assertIs(new_arrival.status, RequestStatus.ACCEPTED)
+
     def test_same_function_routes_consistently_without_using_request_identity(self):
         """Il routing dipende dal nome della funzione, non dall'ID dell'invocazione."""
         infra = Infrastructure()
@@ -92,8 +109,28 @@ class RoutingTest(unittest.TestCase):
         target = ring.select_node(function())
         for _ in range(2):
             self.assertIs(infra.submit(Request(function())), target)
+        # Esaurito il primo nodo, le richieste raggiungono in ordine i due
+        # successori fisici. Ogni nodo può ammettere due prenotazioni.
+        points = sorted(
+            (ArchitectureRing._hash(f'{node.id.key}#{index}'), node)
+            for node in ring for index in range(ring.replicas)
+        )
+        function_hash = ArchitectureRing._hash(function().name)
+        successors = [node for point, node in points if point >= function_hash]
+        successors.extend(node for point, node in points if point < function_hash)
+        expected_order = list(dict.fromkeys(successors))
+        self.assertIs(expected_order[0], target)
+        for alternative in expected_order[1:]:
+            for _ in range(2):
+                request = Request(function())
+                self.assertIs(infra.submit(request), alternative)
+                self.assertIs(request.node, alternative)
+                self.assertIs(request.status, RequestStatus.ACCEPTED)
+
         rejected = Request(function())
         self.assertIsNone(infra.submit(rejected))
+        self.assertIs(rejected.node, target)
+        self.assertIs(rejected.status, RequestStatus.REJECTED)
         self.assertEqual(rejected.rejection_reason, 'out_of_resources')
 
 

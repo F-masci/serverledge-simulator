@@ -5,8 +5,6 @@ from typing import TYPE_CHECKING
 
 from ..function import Function
 from ..request import Request
-from .completion_event import CompletionEvent
-from .container_ready_event import ContainerReadyEvent
 from .event import Event
 
 if TYPE_CHECKING:
@@ -34,12 +32,6 @@ class ArrivalEvent(Event):
             raise ValueError('Interarrivo troppo piccolo per avanzare il tempo simulato')
         engine.schedule(next_time, ArrivalEvent(self.function))
         duration = sampler.service.sample()
-        request = Request(self.function, service_duration=duration)
-        node = infrastructure.submit(request)
-        if node is not None:
-            if request.warm:
-                engine.schedule_after(duration, CompletionEvent(request, arrival_time=engine.now))
-            else:
-                ready = ContainerReadyEvent(request, arrival_time=engine.now)
-                engine.schedule_after(self.function.cold_start_time, ready)
-        simulation.metrics.record_admission(request, engine.now)
+        request = Request(self.function, service_duration=duration, arrival_time=engine.now)
+        infrastructure.submit(request)
+        simulation.record_submission(request)

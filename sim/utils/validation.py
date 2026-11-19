@@ -16,6 +16,12 @@ def positive_number(value: float, name: str) -> float:
     return float(value)
 
 
+def integer(value: int, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise ValueError(f'{name} deve essere un intero')
+    return int(value)
+
+
 def nonnegative_integer(value: int, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, Integral) or value < 0:
         raise ValueError(f'{name} deve essere un intero non negativo')
