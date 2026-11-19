@@ -1,22 +1,14 @@
-"""Contratto polimorfico degli eventi e stato delle loro pianificazioni."""
+"""Occorrenze degli eventi nel calendario e relativi stati."""
 
-from abc import ABC, abstractmethod
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from .event import Event
+
 if TYPE_CHECKING:
-    from .engine import SimulationEngine
-
-
-class Event(ABC):
-    """Operazione istantanea eseguita al tempo corrente del motore.
-
-    Le durate si rappresentano pianificando eventi futuri, senza attese reali.
-    """
-
-    @abstractmethod
-    def execute(self, engine: 'SimulationEngine') -> None:
-        """Modifica il modello e può pianificare ulteriori eventi."""
+    from sim.core.engine import SimulationEngine
+    from sim.core.simulation import Simulation
+    from ..infrastructure import Infrastructure
 
 
 class EventStatus(Enum):
@@ -58,10 +50,13 @@ class ScheduledEvent:
         self._status = EventStatus.CANCELLED
         return True
 
-    def _execute(self, engine: 'SimulationEngine') -> None:
+    def _execute(
+        self, simulation: 'Simulation | None', engine: 'SimulationEngine',
+        infrastructure: 'Infrastructure | None',
+    ) -> None:
         self._status = EventStatus.RUNNING
         try:
-            self.event.execute(engine)
+            self.event.execute(simulation, engine, infrastructure)
         except BaseException:
             self._status = EventStatus.FAILED
             raise

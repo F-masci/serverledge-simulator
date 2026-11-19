@@ -3,7 +3,7 @@
 from collections.abc import Mapping
 from types import MappingProxyType
 
-from sim.validation import nonempty_string
+from sim.utils.validation import nonempty_string
 from .ring import ArchitectureRing
 from .node import Node
 from .request import Request

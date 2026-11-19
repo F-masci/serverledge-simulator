@@ -1,1 +1,23 @@
-first_event_time = 1.0
+seed = 12345
+
+[[functions]]
+name = "hello"
+first_arrival_time = 1.0
+runtime = "python314"
+memory_mb = 128
+cpu_demand = 1.0
+max_concurrency = 1
+supported_archs = ["amd64", "arm64"]
+arrival_rate = 2.0
+service_rate = 4.0
+
+[[functions]]
+name = "resize"
+first_arrival_time = 1.5
+runtime = "python314"
+memory_mb = 256
+cpu_demand = 0.5
+max_concurrency = 2
+supported_archs = ["amd64"]
+arrival_rate = 1.0
+service_rate = 2.0

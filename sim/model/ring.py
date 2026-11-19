@@ -3,7 +3,7 @@
 from bisect import bisect_left
 from collections.abc import Iterator
 
-from sim.validation import nonempty_string, positive_integer, positive_number
+from sim.utils.validation import nonempty_string, positive_integer, positive_number
 from .node import Node
 from .request import Request
 from .function import Function

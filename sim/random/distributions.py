@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 
-from sim.validation import positive_number
+from sim.utils.validation import positive_number
 
 from .streams import RandomStreams, StreamKind
 
@@ -27,6 +27,14 @@ class PoissonArrivalProcess(ArrivalProcess):
 
     def next_iat(self) -> float:
         return float(self._rng.exponential(self._scale))
+
+
+class DeterministicArrivalProcess(ArrivalProcess):
+    def __init__(self, rate: float) -> None:
+        self._interval = positive_number(1 / positive_number(rate, 'rate'), 'interarrivo medio')
+
+    def next_iat(self) -> float:
+        return self._interval
 
 
 class ServiceTime(ABC):
@@ -61,3 +69,11 @@ class GammaServiceTime(ServiceTime):
 
     def sample(self) -> float:
         return float(self._rng.gamma(shape=self._shape, scale=self._scale))
+
+
+class DeterministicServiceTime(ServiceTime):
+    def __init__(self, mean: float) -> None:
+        self._duration = positive_number(mean, 'mean')
+
+    def sample(self) -> float:
+        return self._duration

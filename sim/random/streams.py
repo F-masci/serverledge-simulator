@@ -7,7 +7,7 @@ import struct
 
 import numpy as np
 from numpy.random import Generator, PCG64DXSM, SeedSequence
-from sim.validation import nonnegative_integer
+from sim.utils.validation import nonnegative_integer
 
 
 class StreamKind(IntEnum):

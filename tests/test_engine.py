@@ -19,7 +19,7 @@ class RecordEvent(Event):
     label: str
     records: list
 
-    def execute(self, engine):
+    def execute(self, simulation, engine, infrastructure):
         self.records.append((self.label, engine.now))
 
 
@@ -45,7 +45,7 @@ class EngineTest(unittest.TestCase):
         records = self.records
 
         class Parent(Event):
-            def execute(self, engine):
+            def execute(self, simulation, engine, infrastructure):
                 records.append(('parent', engine.now))
                 engine.schedule_after(0, RecordEvent('child', records))
                 engine.schedule_after(2, RecordEvent('future', records))
@@ -111,7 +111,7 @@ class EngineTest(unittest.TestCase):
     def test_failure_is_propagated_without_hiding_partial_execution(self):
         """Un errore marca FAILED, mantiene il tempo dell'evento e non perde i successivi."""
         class Failure(Event):
-            def execute(self, engine):
+            def execute(self, simulation, engine, infrastructure):
                 raise ValueError('failure')
 
         failed = self.engine.schedule(1, Failure())
@@ -128,7 +128,7 @@ class EngineTest(unittest.TestCase):
         test = self
 
         class Recursive(Event):
-            def execute(self, engine):
+            def execute(self, simulation, engine, infrastructure):
                 with test.assertRaises(RuntimeError):
                     engine.step()
                 with test.assertRaises(RuntimeError):

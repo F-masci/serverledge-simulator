@@ -17,8 +17,9 @@ class RequestStatus(Enum):
 
 
 class Request:
-    def __init__(self, function: Function) -> None:
+    def __init__(self, function: Function, *, service_duration: float | None = None) -> None:
         self._function = function
+        self._service_duration = service_duration
         self._status = RequestStatus.CREATED
         self._node = None
         self._container = None
@@ -28,6 +29,11 @@ class Request:
     @property
     def function(self) -> Function:
         return self._function
+
+    @property
+    def service_duration(self) -> float | None:
+        """Durata di servizio richiesta, in secondi simulati."""
+        return self._service_duration
 
     @property
     def status(self) -> RequestStatus:

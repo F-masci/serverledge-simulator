@@ -2,10 +2,16 @@
 
 from heapq import heappop, heappush
 from itertools import count
+from typing import TYPE_CHECKING
 
-from sim.validation import finite_time
+from sim.utils.validation import finite_time
 
-from .event import Event, EventStatus, ScheduledEvent
+from sim.model.events import Event, EventStatus, ScheduledEvent
+
+
+if TYPE_CHECKING:
+    from sim.model.infrastructure import Infrastructure
+    from .simulation import Simulation
 
 
 class SimulationEngine:
@@ -15,7 +21,12 @@ class SimulationEngine:
     non confronta oggetti Event e non contiene logica di servizio o routing.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self, *, simulation: 'Simulation | None' = None,
+        infrastructure: 'Infrastructure | None' = None,
+    ) -> None:
+        self._simulation = simulation
+        self._infrastructure = infrastructure
         self._now = 0.0
         self._calendar: list[tuple[float, int, ScheduledEvent]] = []
         self._sequence = count()
@@ -64,7 +75,7 @@ class SimulationEngine:
             return False
         time, _, handle = heappop(self._calendar)
         self._now = time
-        handle._execute(self)
+        handle._execute(self._simulation, self, self._infrastructure)
         return True
 
     def step(self) -> bool:

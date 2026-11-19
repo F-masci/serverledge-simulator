@@ -3,23 +3,32 @@
 import argparse
 from pathlib import Path
 
-from .io.scenario import load_scenario
-from .simulation import Simulation
+from .io.scenario import Scenario
+from .core.simulation import Simulation
+from .utils.validation import nonnegative_integer
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description='Schedula il primo evento dello scenario')
+    parser = argparse.ArgumentParser(description='Avvia uno scenario di arrivi a eventi discreti')
     parser.add_argument('scenario', type=Path, help='File YAML, TOML o JSON')
+    parser.add_argument('--arrivals', type=int, default=0, help='Numero di arrivi da osservare (default: 0)')
     args = parser.parse_args()
 
     try:
-        simulation = Simulation(load_scenario(args.scenario))
-        first_event = simulation.start()
+        arrivals = nonnegative_integer(args.arrivals, '--arrivals')
+        simulation = Simulation(Scenario.load(args.scenario))
+        first_arrivals = simulation.start()
+        for _ in range(arrivals):
+            simulation.engine.step()
     except (OSError, ValueError) as error:
         parser.error(str(error))
 
     print(f'Tempo corrente: {simulation.engine.now} s')
-    print(f'Primo evento schedulato a {first_event.time} s')
+    first_time = min(arrival.time for arrival in first_arrivals)
+    print(f'Arrivi iniziali schedulati: {len(first_arrivals)} (primo a {first_time} s)')
+    if arrivals:
+        print(f'Arrivi elaborati: {simulation.arrivals}')
+        print(f'Prossimo arrivo: {simulation.engine.next_event_time} s')
 
 
 if __name__ == '__main__':
