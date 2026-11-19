@@ -4,6 +4,7 @@ from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
+from sim.model.container import ContainerState, DockerContainer
 from sim.model.infrastructure import Infrastructure
 from sim.model.node import Node
 from sim.model.request import Request, RequestStatus
@@ -56,6 +57,64 @@ class _InvocationMetrics:
         }
 
 
+_LIVE_STATES = (ContainerState.CREATING, ContainerState.BUSY, ContainerState.IDLE)
+
+
+def _timed_snapshot(accumulator: TimedWelford, now: float) -> dict:
+    moments = accumulator.snapshot(now)
+    return {'observed_time_s': moments.weight, 'mean': moments.mean, 'variance': moments.variance}
+
+
+class _ContainerMetrics:
+    def __init__(self) -> None:
+        self.counts = dict.fromkeys(_LIVE_STATES, 0)
+        self.time_weighted = {state: TimedWelford(0, 0) for state in _LIVE_STATES}
+        self.creations_started = 0
+        self.created = 0
+        self.creation_failed = 0
+        self.destroyed = 0
+        self.creation_time = Welford()
+
+    def observe(self, now: float, state: ContainerState, delta: int) -> None:
+        self.counts[state] += delta
+        self.time_weighted[state].observe(now, self.counts[state])
+
+    def record_transition(
+        self, now: float, previous: ContainerState | None, state: ContainerState,
+        creation_time: float | None,
+    ) -> None:
+        if previous is not None:
+            self.observe(now, previous, -1)
+        if state in self.counts:
+            self.observe(now, state, 1)
+        if previous is None:
+            self.creations_started += 1
+        elif previous is ContainerState.CREATING:
+            if state is ContainerState.DESTROYED:
+                self.creation_failed += 1
+            else:
+                self.created += 1
+                if creation_time is not None:
+                    self.creation_time.add(creation_time)
+        elif state is ContainerState.DESTROYED:
+            self.destroyed += 1
+
+    def snapshot(self, now: float) -> dict:
+        return {
+            **{state.value: count for state, count in self.counts.items()},
+            'creations_started': self.creations_started,
+            'created': self.created,
+            'creation_failed': self.creation_failed,
+            'destroyed': self.destroyed,
+            'mean_creation_time_s': self.creation_time.mean,
+            'creation_time_variance_s2': self.creation_time.variance,
+            'time_weighted_counts': {
+                state.value: _timed_snapshot(accumulator, now)
+                for state, accumulator in self.time_weighted.items()
+            },
+        }
+
+
 class _NodeMetrics:
     def __init__(self, node: Node, now: float) -> None:
         self.invocations = _InvocationMetrics()
@@ -78,21 +137,15 @@ class _NodeMetrics:
             self.resources[name].observe(now, value)
 
     def snapshot(self, node: Node, now: float) -> dict:
-        time_weighted_resources = {}
-        for name, accumulator in self.resources.items():
-            moments = accumulator.snapshot(now)
-            time_weighted_resources[name] = {
-                'observed_time_s': moments.weight,
-                'mean': moments.mean,
-                'variance': moments.variance,
-            }
         return {
             **self._reservations(node),
             'total_cpus': node.resources.total_cpus,
             'total_memory_mb': node.resources.total_memory,
             'invocations': self.invocations.snapshot(),
             'by_function': {name: stats.snapshot() for name, stats in self.by_function.items()},
-            'time_weighted_resources': time_weighted_resources,
+            'time_weighted_resources': {
+                name: _timed_snapshot(accumulator, now) for name, accumulator in self.resources.items()
+            },
         }
 
 
@@ -103,6 +156,10 @@ class SimulationMetrics:
         self._total = _InvocationMetrics()
         self._by_function: dict[str, _InvocationMetrics] = {}
         self._by_node: dict[Node, _NodeMetrics] = {}
+        self._containers: dict[tuple[Node | None, str | None], _ContainerMetrics] = {}
+        self._container_functions_by_node: dict[Node, set[str]] = {}
+        self._container_functions: set[str] = set()
+        self._creation_started_at: dict[DockerContainer, float] = {}
 
     @property
     def arrivals(self) -> int:
@@ -113,6 +170,40 @@ class SimulationMetrics:
         if node not in self._by_node:
             self._by_node[node] = _NodeMetrics(node, now)
 
+            for container in node.iter_containers():
+                for stats in self._container_scopes(node, container.function.name):
+                    stats.observe(now, container.state, 1)
+
+    def _container_scopes(self, node: Node, name: str) -> Iterator[_ContainerMetrics]:
+        self._container_functions.add(name)
+        self._container_functions_by_node.setdefault(node, set()).add(name)
+        for scope in ((None, None), (None, name), (node, None), (node, name)):
+            if scope not in self._containers:
+                self._containers[scope] = _ContainerMetrics()
+            yield self._containers[scope]
+
+    def record_container_state(
+        self, node: Node, container: DockerContainer, previous: ContainerState | None, now: float,
+    ) -> None:
+        creation_time = None
+        if previous is None:
+            self._creation_started_at[container] = now
+        elif previous is ContainerState.CREATING:
+            started_at = self._creation_started_at.pop(container, None)
+            if started_at is not None:
+                creation_time = now - started_at
+        for stats in self._container_scopes(node, container.function.name):
+            stats.record_transition(now, previous, container.state, creation_time)
+        self.observe_resources(node, now)
+
+    def _container_snapshot(self, now: float, node: Node | None = None, name: str | None = None) -> dict:
+        stats = self._containers.get((node, name))
+        return (stats if stats is not None else _ContainerMetrics()).snapshot(now)
+
+    def observe_resources(self, node: Node, now: float) -> None:
+        self.register_node(node, now)
+        self._by_node[node].observe(node, now)
+
     def _invocations_for(self, request: Request, now: float) -> Iterator[_InvocationMetrics]:
         name = request.function.name
         if name not in self._by_function:
@@ -121,11 +212,10 @@ class SimulationMetrics:
         yield self._by_function[name]
         node = request.node
         if node is not None:
-            self.register_node(node, now)
+            self.observe_resources(node, now)
             stats = self._by_node[node]
             if name not in stats.by_function:
                 stats.by_function[name] = _InvocationMetrics()
-            stats.observe(node, now)
             yield stats.invocations
             yield stats.by_function[name]
 
@@ -148,11 +238,22 @@ class SimulationMetrics:
                 stats = self._by_node.get(node)
                 if stats is None:
                     stats = _NodeMetrics(node, now)
-                nodes[node.id.key] = stats.snapshot(node, now)
+                node_snapshot = stats.snapshot(node, now)
+                node_snapshot['containers'] = self._container_snapshot(now, node)
+                for name in sorted(stats.by_function.keys() | self._container_functions_by_node.get(node, set())):
+                    function_stats = node_snapshot['by_function'].setdefault(name, _InvocationMetrics().snapshot())
+                    function_stats['containers'] = self._container_snapshot(now, node, name)
+                nodes[node.id.key] = node_snapshot
             nodes_by_ring[ring_id] = nodes
         return {
             'time_s': now,
-            'total': self._total.snapshot(),
-            'by_function': {name: stats.snapshot() for name, stats in self._by_function.items()},
+            'total': {**self._total.snapshot(), 'containers': self._container_snapshot(now)},
+            'by_function': {
+                name: {
+                    **self._by_function.get(name, _InvocationMetrics()).snapshot(),
+                    'containers': self._container_snapshot(now, name=name),
+                }
+                for name in sorted(self._by_function.keys() | self._container_functions)
+            },
             'nodes_by_ring': nodes_by_ring,
         }

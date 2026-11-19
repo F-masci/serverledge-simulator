@@ -41,13 +41,37 @@ class Scenario:
     seed: int = 12345
     function_registry: Mapping[str, Function] = field(init=False, repr=False, compare=False)
     _rings: tuple[_RingSpec, ...]
+    container_idle_timeout: float
+    container_cleanup_interval: float
 
     def __init__(
         self, functions: Iterable[Function | Mapping[str, object]],
         seed: int = 12345,
         *, infrastructure: Mapping[str, object] | None = None,
+        containers: Mapping[str, object] | None = None,
     ) -> None:
         object.__setattr__(self, 'seed', nonnegative_integer(seed, 'seed'))
+        if containers is None:
+            containers = {}
+        if not isinstance(containers, Mapping) or containers.keys() - {'idle_timeout', 'cleanup_interval', 'startup_times'}:
+            raise ValueError('containers accetta solo idle_timeout, cleanup_interval e startup_times')
+        idle_timeout = finite_time(containers.get('idle_timeout', 600), 'containers.idle_timeout')
+        cleanup_interval = finite_time(containers.get('cleanup_interval', 30), 'containers.cleanup_interval')
+        if idle_timeout < 0 or cleanup_interval <= 0:
+            raise ValueError('idle_timeout deve essere non negativo e cleanup_interval positivo')
+        object.__setattr__(self, 'container_idle_timeout', idle_timeout)
+        object.__setattr__(self, 'container_cleanup_interval', cleanup_interval)
+        startup_times = containers.get('startup_times', {})
+        if not isinstance(startup_times, Mapping):
+            raise ValueError('containers.startup_times deve associare immagini a durate')
+        image_times = {}
+        for image, duration in startup_times.items():
+            image = nonempty_string(image, 'containers.startup_times (immagine)')
+            duration = finite_time(duration, f'containers.startup_times.{image}')
+            if duration < 0:
+                raise ValueError(f'Il tempo di avvio per {image} deve essere non negativo')
+            image_times[image] = duration
+
         registry: dict[str, Function] = {}
         streams = RandomStreams(self.seed)
         for index, definition in enumerate(functions):
@@ -63,7 +87,12 @@ class Scenario:
                 raise ValueError(f'Profilo di simulazione mancante o non valido per {function.name}')
             if function.name in registry:
                 raise ValueError(f'Funzione già registrata: {function.name}')
-            registry[function.name] = replace(function, sampler=profile.build_sampler(function.name, streams))
+            runtime = function.runtime
+            if isinstance(runtime, (BuiltinRuntime, CustomRuntime)) and runtime.image in image_times:
+                runtime = replace(runtime, startup_time=image_times[runtime.image])
+            registry[function.name] = replace(
+                function, runtime=runtime, sampler=profile.build_sampler(function.name, streams),
+            )
         if not registry:
             raise ValueError('Lo scenario richiede almeno una funzione')
         object.__setattr__(self, 'functions', tuple(registry.values()))
@@ -78,7 +107,10 @@ class Scenario:
                 ring.id, arch=ring.arch, memory=ring.memory_mb, cpus=ring.cpus, replicas=ring.replicas,
             )
             for node in ring.nodes:
-                infrastructure.create_node(ring.id, node.name, node.area, node.machine_tag)
+                infrastructure.create_node(
+                    ring.id, node.name, node.area, node.machine_tag,
+                    idle_timeout=self.container_idle_timeout,
+                )
         return infrastructure
 
     def _load_rings(self, infrastructure: object) -> tuple[_RingSpec, ...]:
@@ -142,7 +174,7 @@ class Scenario:
             data = reader(source)
         if not isinstance(data, dict):
             raise ValueError('Lo scenario deve essere una tabella')
-        if unknown := data.keys() - {'functions', 'function', 'seed', 'infrastructure'}:
+        if unknown := data.keys() - {'functions', 'function', 'seed', 'infrastructure', 'containers'}:
             raise ValueError(f'Parametri scenario sconosciuti: {sorted(map(str, unknown))}')
 
         if 'function' in data and 'functions' in data:
@@ -155,6 +187,7 @@ class Scenario:
             functions=definitions,
             seed=data.get('seed', 12345),
             infrastructure=data.get('infrastructure'),
+            containers=data.get('containers'),
         )
 
     @staticmethod
@@ -177,7 +210,8 @@ class Scenario:
     def _load_function(self, data: object) -> Function:
         required = {'name', 'runtime', 'memory_mb', 'cpu_demand', 'arrival_rate', 'service_rate', 'first_arrival_time'}
         optional = {'custom_image', 'max_concurrency', 'supported_archs', 'tag_pattern',
-                    'tar_function_code', 'arrival_distribution', 'service_distribution', 'service_scv'}
+                    'tar_function_code', 'arrival_distribution', 'service_distribution', 'service_scv',
+                    'code_load_time'}
         if not isinstance(data, Mapping):
             raise ValueError('La definizione della funzione deve essere una tabella')
         if missing := required - data.keys():
@@ -221,6 +255,7 @@ class Scenario:
                 arrival_distribution=data.get('arrival_distribution', 'poisson'),
                 service_distribution=data.get('service_distribution', 'gamma'),
                 service_scv=data.get('service_scv'),
+                code_load_time=data.get('code_load_time', 0),
             ),
             **metadata,
         )

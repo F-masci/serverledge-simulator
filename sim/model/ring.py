@@ -66,6 +66,7 @@ class ArchitectureRing:
     def create_node(
         self, name: str, area: str,
         machine_tag: str | None = None,
+        *, idle_timeout: float = 600,
     ) -> Node:
         """Costruisce e registra un nodo dell'architettura dell'anello."""
 
@@ -75,7 +76,7 @@ class ArchitectureRing:
         if any(node.id.key == name for node in self._nodes):
             raise ValueError(f'Nodo già presente nell\'anello: {name}')
         
-        node = Node(name, self.memory, self.cpus, area, self.arch, machine_tag)
+        node = Node(name, self.memory, self.cpus, area, self.arch, machine_tag, idle_timeout=idle_timeout)
         for index in range(self._replicas):
             position = self._hash(f'{node.id.key}#{index}')
             self._positions.append(position)

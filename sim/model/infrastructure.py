@@ -49,6 +49,7 @@ class Infrastructure:
 
     def create_node(
         self, ring_id: str, name: str, area: str, machine_tag: str | None = None,
+        *, idle_timeout: float = 600,
     ) -> Node:
         """Ottiene il ring tramite create_ring e gli delega la creazione del nodo.
 
@@ -56,7 +57,7 @@ class Infrastructure:
         del singolo nodo e non possono essere sovrascritte alla creazione.
         """
         ring = self.create_ring(ring_id)
-        return ring.create_node(name, area, machine_tag)
+        return ring.create_node(name, area, machine_tag, idle_timeout=idle_timeout)
 
     def submit(self, request: Request) -> Node | None:
         """Chiede al bilanciatore il ring e delega a esso l'inoltro al nodo.

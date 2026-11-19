@@ -1,4 +1,11 @@
-"""Verifiche della pianificazione degli arrivi a orizzonte infinito."""
+"""Verifiche degli arrivi e del ciclo di vita dei container.
+
+Riferimenti Infrascaler per il ciclo di vita:
+- internal/container/runtimes.go: immagini Docker dei runtime integrati.
+- internal/container/container.go: scelta dell'immagine e copia del codice.
+- internal/node/pool.go: riuso del container e scadenza delle istanze idle.
+- internal/node/janitor_handler.go: pulizia periodica dei container scaduti.
+"""
 
 import json
 from pathlib import Path
@@ -10,6 +17,7 @@ from sim.io.scenario import Scenario
 from sim.model.function import BuiltinRuntime, CustomRuntime, Function, FunctionProfile
 from sim.core.simulation import Simulation
 from sim.model.events import ArrivalEvent
+from sim.model.container import ContainerState
 from sim.model.infrastructure import Infrastructure
 from sim.model.request import RequestStatus
 from sim.utils.welford import TimedWelford, Welford
@@ -217,15 +225,16 @@ class SimulationTest(unittest.TestCase):
             self.assertEqual((service.mean, service.scv), (0.25, 0.5))
 
     def test_accepted_arrival_completes_and_releases_resources(self):
-        """Uno scarto lascia in calendario solo il completamento già previsto e il prossimo arrivo."""
+        """Uno scarto non schedula completamenti e il riuso invalida la vecchia pulizia."""
         function = Function('hello', 128, 1, BuiltinRuntime('python314'), profile=FunctionProfile(
             arrival_rate=1, service_rate=2 / 3, first_arrival_time=0,
             arrival_distribution='deterministic', service_distribution='deterministic',
         ))
         target = RecordingInfrastructure()
         target.create_ring('edge', arch='amd64', memory=128, cpus=1)
-        node = target.create_node('edge', 'n1', 'edge')
-        simulation = Simulation(Scenario((function,)), target)
+        node = target.create_node('edge', 'n1', 'edge', idle_timeout=0.5)
+        scenario = Scenario((function,), containers={'cleanup_interval': 1})
+        simulation = Simulation(scenario, target)
         simulation.start()
         engine = simulation.engine
         engine.step()
@@ -241,6 +250,8 @@ class SimulationTest(unittest.TestCase):
         self.assertIsNone(in_flight['total']['mean_response_time_s'])
         self.assertEqual(in_flight['nodes_by_ring']['edge']['n1']['busy_memory_mb'], 128)
 
+        engine.step()  # Fine della creazione a t=0.
+        self.assertEqual(first.container.state, ContainerState.BUSY)
         engine.step()
         self.assertEqual(engine.now, 1)
         rejected = target.requests[-1]
@@ -254,13 +265,19 @@ class SimulationTest(unittest.TestCase):
         self.assertIs(rejected.status, RequestStatus.REJECTED)
         self.assertEqual(node.resources.used_cpus, 0)
         self.assertEqual(node.resources.warm_pool_used_mem, 128)
-        self.assertEqual(engine.pending_count, 1)
+        self.assertEqual(engine.pending_count, 2)
 
         engine.step()
         reused = target.requests[-1]
         self.assertTrue(reused.warm)
         self.assertIs(reused.container, first.container)
+        # La prima scadenza è t=2. Al controllo di t=3 il container è
+        # di nuovo occupato e rimane disponibile per completare il servizio.
+        engine.run(until=3)
+        self.assertIs(reused.container.state, ContainerState.BUSY)
+        self.assertIsNone(reused.container.expiration_time)
         engine.run(until=3.5)
+        self.assertEqual(reused.container.expiration_time, 4)
         self.assertIs(reused.status, RequestStatus.COMPLETED)
         snapshot = simulation.metrics_snapshot()
         totals = snapshot['total']
@@ -273,7 +290,8 @@ class SimulationTest(unittest.TestCase):
         self.assertEqual(totals['mean_service_time_s'], 1.5)
         resources = snapshot['nodes_by_ring']['edge']['n1']
         self.assertEqual((resources['used_cpus'], resources['warm_memory_mb']), (0, 128))
-        self.assertEqual(resources['invocations'], totals)
+        self.assertEqual(resources['invocations'], {key: value for key, value in totals.items() if key != 'containers'})
+        self.assertEqual(resources['containers'], totals['containers'])
         self.assertEqual(resources['by_function']['hello'], totals)
         self.assertEqual(totals['response_time_variance_s2'], 0)
         cpu = resources['time_weighted_resources']['used_cpus']
@@ -282,6 +300,79 @@ class SimulationTest(unittest.TestCase):
         self.assertAlmostEqual(cpu['variance'], 6 / 49)
         self.assertAlmostEqual(resources['time_weighted_resources']['warm_memory_mb']['mean'], 128 / 7)
         self.assertEqual(in_flight['total']['pending'], 1)
+
+    def test_functions_using_the_same_image_share_startup_time(self):
+        # La stessa immagine, selezionata dal runtime integrato o indicata
+        # esplicitamente, conserva il proprio costo di avvio. Il costo di
+        # caricamento rimane indipendente per ciascuna funzione.
+        image = 'grussorusso/serverledge-python314'
+        workload = dict(memory_mb=128, cpu_demand=1, arrival_rate=1,
+                        service_rate=1, first_arrival_time=0)
+        scenario = Scenario([
+            dict(workload, name='builtin', runtime='python314', code_load_time=0.125),
+            dict(workload, name='custom', runtime='custom', custom_image=image,
+                 supported_archs=['amd64'], code_load_time=0.25),
+        ], containers={'startup_times': {image: 0.5}})
+
+        builtin, custom = scenario.functions
+        self.assertEqual(builtin.runtime.startup_time, 0.5)
+        self.assertEqual(custom.runtime.startup_time, 0.5)
+        self.assertEqual(builtin.cold_start_time, 0.625)
+        self.assertEqual(custom.cold_start_time, 0.75)
+
+    def test_cold_start_then_periodic_cleanup_releases_warm_memory(self):
+        """Creazione, servizio e scadenza sono fasi distinte sul calendario."""
+        function = Function('hello', 128, 1, BuiltinRuntime('python314', startup_time=0.75), profile=FunctionProfile(
+            arrival_rate=0.2, service_rate=2, first_arrival_time=0,
+            arrival_distribution='deterministic', service_distribution='deterministic',
+            code_load_time=0.25,
+        ))
+        target = RecordingInfrastructure()
+        target.create_ring('edge', arch='amd64', memory=128, cpus=1)
+        node = target.create_node('edge', 'n1', 'edge', idle_timeout=1.5)
+        scenario = Scenario((function,), containers={'cleanup_interval': 1})
+        simulation = Simulation(scenario, target)
+        simulation.start()
+        engine = simulation.engine
+        engine.run(until=0.5)
+        first = target.requests[0]
+        self.assertIs(first.container.state, ContainerState.CREATING)
+        self.assertEqual(node.resources.used_cpus, 1)
+        # Durante il cold start conta una sola istanza, ancora in creazione.
+        containers = simulation.metrics_snapshot()['total']['containers']
+        self.assertEqual((containers['creating'], containers['creations_started'], containers['created']), (1, 1, 0))
+        engine.run(until=1)
+        self.assertIs(first.container.state, ContainerState.BUSY)
+        self.assertIs(first.status, RequestStatus.ACCEPTED)
+        engine.run(until=1.5)
+        self.assertIs(first.status, RequestStatus.COMPLETED)
+        self.assertIs(first.container.state, ContainerState.IDLE)
+        totals = simulation.metrics_snapshot()['total']
+        self.assertEqual(totals['mean_response_time_s'], 1.5)
+        self.assertEqual(totals['mean_service_time_s'], 0.5)
+        containers = totals['containers']
+        self.assertEqual((containers['creating'], containers['busy'], containers['idle']), (0, 0, 1))
+        self.assertEqual(containers['mean_creation_time_s'], 1)
+        engine.run(until=3)
+        self.assertIs(first.container.state, ContainerState.IDLE)
+        engine.run(until=4)
+        self.assertIs(first.container.state, ContainerState.DESTROYED)
+        self.assertEqual(node.resources.warm_pool_used_mem, 0)
+        engine.run(until=4.5)
+        snapshot = simulation.metrics_snapshot()
+        node_stats = snapshot['nodes_by_ring']['edge']['n1']
+        warm = node_stats['time_weighted_resources']['warm_memory_mb']
+        # La rimozione azzera gli idle e conserva il tempo trascorso in quello stato.
+        containers = snapshot['total']['containers']
+        self.assertEqual((containers['idle'], containers['destroyed']), (0, 1))
+        self.assertAlmostEqual(containers['time_weighted_counts']['idle']['mean'], 2.5 / 4.5)
+        self.assertEqual(snapshot['by_function']['hello']['containers'], containers)
+        self.assertEqual(node_stats['containers'], containers)
+        self.assertEqual(node_stats['by_function']['hello']['containers'], containers)
+        self.assertAlmostEqual(warm['mean'], 128 * 2.5 / 4.5)
+        engine.run(until=5)
+        self.assertFalse(target.requests[-1].warm)
+        self.assertIsNot(target.requests[-1].container, first.container)
 
     def test_scenario_topology_creates_independent_nodes_for_each_replica(self):
         """Le risorse cambiano nella replica avviata, senza modificare la topologia di un'altra."""

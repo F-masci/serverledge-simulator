@@ -1,7 +1,13 @@
 seed: 12345
+containers:
+  idle_timeout: 600.0
+  cleanup_interval: 30.0
+  startup_times:
+    grussorusso/serverledge-python314: 0.125
 functions:
 - name: hello
   first_arrival_time: 1.0
+  code_load_time: 0.075
   runtime: python314
   memory_mb: 128
   cpu_demand: 1.0
@@ -13,6 +19,7 @@ functions:
   service_rate: 4.0
 - name: resize
   first_arrival_time: 1.5
+  code_load_time: 0.275
   runtime: python314
   memory_mb: 256
   cpu_demand: 0.5

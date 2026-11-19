@@ -12,8 +12,23 @@ from sim.random.streams import RandomStreams
 from sim.utils.validation import finite_time
 
 
+_BUILTIN_IMAGES = {
+    'python314': 'grussorusso/serverledge-python314',
+    'python312ml': 'grussorusso/serverledge-python312ml',
+    'go125': 'grussorusso/serverledge-go125',
+    'nodejs17ng': 'grussorusso/serverledge-nodejs17ng',
+}
+
+
+@dataclass(frozen=True, kw_only=True)
 class Runtime(ABC):
     """Politica di normalizzazione della concorrenza alla registrazione."""
+
+    startup_time: float = 0.0
+
+    def __post_init__(self) -> None:
+        if finite_time(self.startup_time, 'runtime.startup_time') < 0:
+            raise ValueError('runtime.startup_time deve essere non negativo')
 
     @abstractmethod
     def effective_concurrency(self, requested: int) -> int:
@@ -25,8 +40,13 @@ class BuiltinRuntime(Runtime):
     name: str
 
     def __post_init__(self) -> None:
-        if self.name not in {'python314', 'python312ml', 'go125', 'nodejs17ng'}:
+        super().__post_init__()
+        if self.name not in _BUILTIN_IMAGES:
             raise ValueError(f'Runtime sconosciuto: {self.name}')
+
+    @property
+    def image(self) -> str:
+        return _BUILTIN_IMAGES[self.name]
 
     def effective_concurrency(self, requested: int) -> int:
         return 1 if self.name == 'nodejs17ng' else max(1, requested)
@@ -37,6 +57,7 @@ class CustomRuntime(Runtime):
     image: str
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if not self.image:
             raise ValueError('Immagine custom obbligatoria')
 
@@ -62,8 +83,11 @@ class FunctionProfile:
     arrival_distribution: str = 'poisson'
     service_distribution: str = 'gamma'
     service_scv: float | None = None
+    code_load_time: float = 0.0
 
     def __post_init__(self) -> None:
+        if finite_time(self.code_load_time, 'function.code_load_time') < 0:
+            raise ValueError('function.code_load_time deve essere non negativo')
         if finite_time(self.first_arrival_time, 'function.first_arrival_time') < 0:
             raise ValueError('function.first_arrival_time deve essere non negativo')
         if finite_time(self.arrival_rate, 'function.arrival_rate') <= 0:
@@ -131,6 +155,11 @@ class Function:
         object.__setattr__(self, 'supported_archs', tuple(archs))
         object.__setattr__(self, 'max_concurrency',
                            self.runtime.effective_concurrency(self.max_concurrency))
+
+    @property
+    def cold_start_time(self) -> float:
+        """Somma il tempo di avvio dell'immagine e il caricamento del codice."""
+        return self.runtime.startup_time + (self.profile.code_load_time if self.profile else 0.0)
 
     def supports_arch(self, arch: str) -> bool:
         return arch in self.supported_archs

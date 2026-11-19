@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from ..function import Function
 from ..request import Request
 from .completion_event import CompletionEvent
+from .container_ready_event import ContainerReadyEvent
 from .event import Event
 
 if TYPE_CHECKING:
@@ -36,9 +37,9 @@ class ArrivalEvent(Event):
         request = Request(self.function, service_duration=duration)
         node = infrastructure.submit(request)
         if node is not None:
-            if request.warm is False:
-                # Il cold start è istantaneo finché lo scenario non ne definisce la durata.
-                assert request.container is not None
-                node.creation_succeeded(request.container, engine.now)
-            engine.schedule_after(duration, CompletionEvent(request, arrival_time=engine.now))
+            if request.warm:
+                engine.schedule_after(duration, CompletionEvent(request, arrival_time=engine.now))
+            else:
+                ready = ContainerReadyEvent(request, arrival_time=engine.now)
+                engine.schedule_after(self.function.cold_start_time, ready)
         simulation.metrics.record_admission(request, engine.now)

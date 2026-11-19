@@ -4,11 +4,12 @@ I contatori busy/warm rappresentano prenotazioni, non consumo fisico misurato.
 """
 
 from .request import Request
+from sim.utils.validation import finite_time
 
 from dataclasses import dataclass
 from itertools import count
 from types import MappingProxyType
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
 
 from .function import Function
 from .container import DockerContainer, ContainerState
@@ -110,7 +111,12 @@ class Node:
         area: str,
         arch: str,
         machine_tag: str | None = None,
+        *,
+        idle_timeout: float = 600,
     ) -> None:
+        self._idle_timeout = finite_time(idle_timeout, 'node.idle_timeout')
+        if self._idle_timeout < 0:
+            raise ValueError('node.idle_timeout deve essere non negativo')
         self._id = NodeID(
             key=name,
             area=area,
@@ -121,6 +127,8 @@ class Node:
         self._pools: dict[str, ContainerPool] = {}
         self._pending: dict[DockerContainer, bool] = {}
         self._container_ids = count(1)
+        self.on_container_state_change: Callable[[Node, DockerContainer, ContainerState | None], None] | None = None
+        self.on_container_idle: Callable[[Node, DockerContainer], None] | None = None
 
     @property
     def id(self) -> NodeID:
@@ -133,6 +141,12 @@ class Node:
     @property
     def pools(self) -> Mapping[str, ContainerPool]:
         return MappingProxyType(self._pools)
+
+    def iter_containers(self) -> Iterator[DockerContainer]:
+        """Enumera i container in creazione e quelli già nei pool."""
+        yield from self._pending
+        for pool in self._pools.values():
+            yield from pool
 
     def _pool(self, function: Function) -> ContainerPool:
         if function.name not in self._pools:
@@ -159,6 +173,7 @@ class Node:
             container._acquire()
             self.resources._activate(function)
             pool._add(container)
+            self._notify_container_state(container, ContainerState.IDLE)
             return container
         return None if only_warm else self._reserve_creation(function, idle=False)
 
@@ -193,43 +208,66 @@ class Node:
         self.resources._reserve(function, idle=idle)
         container = DockerContainer(f'{self.id.key}/c{next(self._container_ids)}', function)
         self._pending[container] = idle
+        self._notify_container_state(container, None)
         return container
 
-    def creation_succeeded(self, container: DockerContainer, now: float, timeout: float = 600) -> None:
+    def creation_succeeded(self, container: DockerContainer, now: float, timeout: float | None = None) -> None:
         idle = self._pending.pop(container)
-        container._created(idle=idle, now=now, timeout=timeout)
+        container._created(idle=idle, now=now, timeout=self._idle_timeout if timeout is None else timeout)
         self._pool(container.function)._add(container)
+        self._notify_container_state(container, ContainerState.CREATING)
+        if idle:
+            self._notify_container_idle(container)
 
     def creation_failed(self, container: DockerContainer) -> None:
         idle = self._pending.pop(container)
         self.resources._release(container.function, idle=idle)
         container._destroy()
+        self._notify_container_state(container, ContainerState.CREATING)
 
-    def complete(self, container: DockerContainer, now: float, timeout: float = 600) -> None:
+    def complete(self, container: DockerContainer, now: float, timeout: float | None = None) -> None:
         pool = self._pools.get(container.function.name)
         if pool is None or container not in pool.busy:
             raise ValueError('Container non attivo su questo nodo')
-        container._complete(now, timeout)
+        container._complete(now, self._idle_timeout if timeout is None else timeout)
         if container.state is ContainerState.IDLE:
             pool._remove_busy(container)
             pool._add(container)
             self.resources._deactivate(container.function)
+            self._notify_container_state(container, ContainerState.BUSY)
+            self._notify_container_idle(container)
+
+    def _notify_container_state(self, container: DockerContainer, previous: ContainerState | None) -> None:
+        if self.on_container_state_change is not None:
+            self.on_container_state_change(self, container, previous)
+
+    def _notify_container_idle(self, container: DockerContainer) -> None:
+        if self.on_container_idle is not None:
+            self.on_container_idle(self, container)
 
     def _destroy_idle(self, container: DockerContainer) -> None:
         pool = self._pools[container.function.name]
         container._destroy()
         pool._remove_idle(container)
         self.resources._release(container.function, idle=True)
+        self._notify_container_state(container, ContainerState.IDLE)
 
-    def expire(self, now: float) -> None:
+    def expire(self, now: float, *, container: DockerContainer | None = None) -> None:
         """Un passaggio del janitor, da invocare ai tempi stabiliti dal motore.
 
         La distruzione Docker è assunta riuscita in questo modello iniziale.
         """
+        if container is not None:
+            pool = self._pools.get(container.function.name)
+            if pool is not None and container.is_expired(now) and container in pool.idle:
+                self._destroy_idle(container)
+            return
+
         for pool in self._pools.values():
             for container in pool._remove_expired(now):
                 container._destroy()
                 self.resources._release(container.function, idle=True)
+                self._notify_container_state(container, ContainerState.IDLE)
 
     def submit(self, request: Request) -> bool:
         """Tenta l'ammissione locale dopo la selezione di un ring compatibile.
