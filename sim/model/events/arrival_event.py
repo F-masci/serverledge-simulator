@@ -13,7 +13,7 @@ class ArrivalEvent(Event):
     function: Function
 
     ### Callback ###
-    on_accepted: Callable[[Request, Node], None] | None = None
+    on_accepted: Callable[[Request], None] | None = None
     on_rejected: Callable[[Request], None] | None = None
 
     def execute(self) -> None:
@@ -24,33 +24,57 @@ class ArrivalEvent(Event):
             raise RuntimeError('La funzione dell’arrivo deve avere un campionatore')
 
         # Schedula il prossimo arrivo prima di consegnare la richiesta corrente.
-        next_time = engine.now + sampler.arrivals.next_iat()
-        if next_time <= engine.now:
-            raise ValueError('Interarrivo troppo piccolo per avanzare il tempo simulato')
-        event = ArrivalEvent(self.function, ctx=self.ctx)
-        engine.schedule(next_time, event)
+        self._schedule_next_arrival()
 
         # Consegna la richiesta corrente al sistema.
-        duration = sampler.service.sample()
-        request = Request(self.function, service_duration=duration, arrival_time=engine.now)
-        self.ctx.simulation.notify_request_arrival(request)
-        node = self.ctx.infrastructure.submit(request)
+        request = self._submit_request()
 
         # Gestisce l’esito della consegna della richiesta.
-        if node is not None:
+        if request.status is RequestStatus.ACCEPTED:
             # La richiesta è stata accettata e assegnata a un nodo.
-            self._handle_accepted(request, node)
+            self._handle_accepted(request)
         else:
             # La richiesta è stata rifiutata.
             self._handle_rejected(request)
 
-    def _handle_accepted(self, request: Request, node: Node) -> None:
+    def _schedule_next_arrival(self) -> None:
+        """Schedula il prossimo arrivo della funzione associata all’evento."""
+        engine = self.ctx.engine
+        sampler = self.function.sampler
+        if sampler is None:
+            raise RuntimeError('La funzione dell’arrivo deve avere un campionatore')
+
+        # Calcola il tempo del prossimo arrivo.
+        next_time = engine.now + sampler.arrivals.next_iat()
+        if next_time <= engine.now:
+            raise ValueError('Interarrivo troppo piccolo per avanzare il tempo simulato')
+
+        # Schedula il prossimo evento di arrivo.
+        event = ArrivalEvent(self.function, on_accepted=self.on_accepted, ctx=self.ctx)
+        engine.schedule(next_time, event)
+
+    def _submit_request(self) -> Request:
+        """Invia la richiesta al sistema e restituisce il nodo assegnato o None se rifiutata."""
+        engine = self.ctx.engine
+        sampler = self.function.sampler
+        if sampler is None:
+            raise RuntimeError('La funzione dell’arrivo deve avere un campionatore')
+
+        duration = sampler.service.sample()
+        request = Request(self.function, service_duration=duration, arrival_time=engine.now)
+        self.ctx.infrastructure.submit(request)
+        return request
+
+    def _handle_accepted(self, request: Request) -> None:
         """Gestisce l’accettazione della richiesta da parte del nodo."""
         now = self.ctx.engine.now
         self.ctx.metrics.record_submission(request, now)
         self.ctx.observer.notify_request_accepted(request)
+
+        # Schedula l’esecuzione della richiesta sul nodo assegnato
+        # tramite la callback on_accepted su Simulation.
         if self.on_accepted is not None:
-            self.on_accepted(request, node)
+            self.on_accepted(request)
 
     def _handle_rejected(self, request: Request) -> None:
         """Gestisce il rifiuto della richiesta da parte del nodo."""

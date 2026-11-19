@@ -111,7 +111,7 @@ class Simulation:
             f = replace(function, sampler=deepcopy(function.sampler))
 
             # Pianifica l'arrivo iniziale al tempo specificato nel profilo della funzione.
-            event = ArrivalEvent(f, ctx=self._ctx)
+            event = ArrivalEvent(f, on_accepted=self._schedule_execution, ctx=self._ctx)
             scheduled_event = self._ctx.engine.schedule(profile.first_arrival_time, event)
             first_arrivals.append(scheduled_event)
 
@@ -132,8 +132,6 @@ class Simulation:
 
 
 
-    def notify_request_arrival(self, request: Request) -> None:
-        self._ctx.observer.notify(RequestArrived(self.run_id, request.arrival_time, request.id, request.function.name))
 
     def record_completion(self, request: Request, arrival_time: float) -> None:
         now = self._ctx.engine.now
