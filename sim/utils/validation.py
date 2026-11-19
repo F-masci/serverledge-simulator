@@ -9,6 +9,10 @@ def finite_time(value: float, name: str) -> float:
         raise ValueError(f'{name} deve essere un numero finito')
     return float(value)
 
+def finite_delay(value: float, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) or value < 0:
+        raise ValueError(f'{name} deve essere un numero finito e non negativo')
+    return float(value)
 
 def positive_number(value: float, name: str) -> float:
     if isinstance(value, bool) or not math.isfinite(value) or value <= 0:

@@ -170,6 +170,35 @@ class SimulationMetrics:
         self._container_functions: set[str] = set()
         self._creation_started_at: dict[DockerContainer, float] = {}
 
+    def __str__(self) -> str:
+        """Riepilogo globale leggibile delle invocazioni e dei container."""
+        totals = self._total.snapshot()
+        containers = self._containers.get((None, None))
+        if containers is None:
+            containers = _ContainerMetrics()
+        counts = containers.counts
+        lines = [
+            f"Arrivi elaborati: {totals['arrivals']}",
+            f"Accettate: {totals['accepted']} | Scartate: {totals['rejected']} | "
+            f"Completate: {totals['completed']} | Pendenti: {totals['pending']} "
+            f"(in coda: {totals['waiting']})",
+            f"Cold start: {totals['cold_starts']} | Warm start: {totals['warm_starts']}",
+            f"Container in creazione: {counts[ContainerState.CREATING]} | "
+            f"Occupati: {counts[ContainerState.BUSY]} | Inattivi: {counts[ContainerState.IDLE]}",
+            f"Container creati: {containers.created} | Rimossi: {containers.destroyed} | "
+            f"Creazioni fallite: {containers.creation_failed}",
+        ]
+        if totals['rejections_by_reason']:
+            reasons = ', '.join(f'{reason}={count}' for reason, count in sorted(self._total.rejections.items()))
+            lines.append(f'Motivi di scarto: {reasons}')
+        for label, mean in (
+            ('Tempo medio di risposta', totals['mean_response_time_s']),
+            ('Tempo medio di attesa in coda', totals['mean_queue_wait_s']),
+        ):
+            if mean is not None:
+                lines.append(f'{label}: {mean:.6g} s')
+        return '\n'.join(lines)
+
     @property
     def arrivals(self) -> int:
         return self._total.arrivals

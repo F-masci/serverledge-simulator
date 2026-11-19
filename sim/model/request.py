@@ -2,6 +2,7 @@
 
 from enum import Enum
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from .function import Function
 
@@ -22,6 +23,7 @@ class Request:
     def __init__(
         self, function: Function, *, service_duration: float | None = None, arrival_time: float = 0.0,
     ) -> None:
+        self._id = uuid4().hex
         self._function = function
         self._arrival_time = arrival_time
         self._service_duration = service_duration
@@ -30,6 +32,11 @@ class Request:
         self._container = None
         self._warm = None
         self._rejection_reason = None
+
+    @property
+    def id(self) -> str:
+        """Identificativo della singola invocazione."""
+        return self._id
 
     @property
     def function(self) -> Function:

@@ -1,14 +1,13 @@
 """Occorrenze degli eventi nel calendario e relativi stati."""
 
+from collections.abc import Callable
 from enum import Enum
 from typing import TYPE_CHECKING
 
 from .event import Event
 
 if TYPE_CHECKING:
-    from sim.core.engine import SimulationEngine
-    from sim.core.simulation import Simulation
-    from ..infrastructure import Infrastructure
+    from sim.core.simulation import SimulationContext
 
 
 class EventStatus(Enum):
@@ -26,10 +25,16 @@ class ScheduledEvent:
     dello stesso oggetto. Il tempo e lo stato sono pubblicamente di sola lettura.
     """
 
-    def __init__(self, time: float, event: Event) -> None:
+    def __init__(
+        self, time: float, event: Event, *, ctx: 'SimulationContext',
+        on_status_change: 'Callable[[ScheduledEvent, EventStatus], None] | None' = None,
+    ) -> None:
+        if event.ctx is not ctx:
+            raise ValueError('Evento e calendario devono condividere lo stesso contesto')
         self._time = time
         self._event = event
         self._status = EventStatus.PENDING
+        self._on_status_change = on_status_change
 
     @property
     def time(self) -> float:
@@ -43,21 +48,24 @@ class ScheduledEvent:
     def status(self) -> EventStatus:
         return self._status
 
+    def _set_status(self, status: EventStatus) -> None:
+        previous = self._status
+        self._status = status
+        if self._on_status_change is not None:
+            self._on_status_change(self, previous)
+
     def cancel(self) -> bool:
         """True solo se l'occorrenza era ancora pendente."""
         if self.status is not EventStatus.PENDING:
             return False
-        self._status = EventStatus.CANCELLED
+        self._set_status(EventStatus.CANCELLED)
         return True
 
-    def _execute(
-        self, simulation: 'Simulation | None', engine: 'SimulationEngine',
-        infrastructure: 'Infrastructure | None',
-    ) -> None:
-        self._status = EventStatus.RUNNING
+    def execute(self) -> None:
+        self._set_status(EventStatus.RUNNING)
         try:
-            self.event.execute(simulation, engine, infrastructure)
+            self.event.execute()
         except BaseException:
-            self._status = EventStatus.FAILED
+            self._set_status(EventStatus.FAILED)
             raise
-        self._status = EventStatus.EXECUTED
+        self._set_status(EventStatus.EXECUTED)

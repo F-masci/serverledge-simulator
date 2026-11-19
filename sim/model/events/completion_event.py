@@ -1,29 +1,18 @@
 """Completamento di una richiesta accettata."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 from ..request import Request
 from .event import Event
-
-if TYPE_CHECKING:
-    from sim.core.engine import SimulationEngine
-    from sim.core.simulation import Simulation
-    from ..infrastructure import Infrastructure
-
 
 @dataclass(frozen=True)
 class CompletionEvent(Event):
     request: Request
     arrival_time: float
 
-    def execute(
-        self, simulation: 'Simulation | None', engine: 'SimulationEngine',
-        infrastructure: 'Infrastructure | None',
-    ) -> None:
+    def execute(self) -> None:
         """Conclude la richiesta al tempo corrente del motore."""
-        self.request.complete(engine.now)
-        if simulation is not None:
-            simulation.metrics.record_completion(self.request, engine.now, self.arrival_time)
-            assert self.request.node is not None
-            simulation.dispatch_waiting(self.request.node)
+        self.request.complete(self.ctx.engine.now)
+        self.ctx.simulation.record_completion(self.request, self.arrival_time)
+        assert self.request.node is not None
+        self.ctx.simulation.dispatch_waiting(self.request.node)

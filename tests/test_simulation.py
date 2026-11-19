@@ -22,6 +22,8 @@ from sim.model.events import ArrivalEvent
 from sim.model.container import ContainerState
 from sim.model.infrastructure import Infrastructure
 from sim.model.request import RequestStatus
+from sim.observer import Notification, NotificationType, SimulationError, observer
+from sim.observer.logger import log_notification
 from sim.utils.welford import TimedWelford, Welford
 
 
@@ -41,6 +43,83 @@ class RecordingInfrastructure(Infrastructure):
 
 
 class SimulationTest(unittest.TestCase):
+    def test_request_notifications_correlate_arrivals_with_outcomes(self):
+        """Il primo arrivo completa e il secondo viene rifiutato dal nodo saturo."""
+        function = Function('hello', 128, 1, BuiltinRuntime('python314'), profile=FunctionProfile(
+            arrival_rate=1, service_rate=0.4, first_arrival_time=0,
+            arrival_distribution='deterministic', service_distribution='deterministic',
+        ))
+        scenario = Scenario((function,), infrastructure={'rings': [{
+            'id': 'edge', 'arch': 'amd64', 'memory_mb': 128, 'cpus': 1,
+            'nodes': [{'name': 'n1', 'area': 'edge'}],
+        }]})
+        notifications: list[Notification] = []
+        self.addCleanup(observer.subscribe(notifications.append))
+
+        Simulation(scenario).run(arrivals=4)
+
+        payloads = [json.loads(json.dumps(event.to_dict())) for event in notifications
+                    if event.type.value.startswith('request.')]
+        first, second, rejected = [payload['data'] for payload in payloads[:3]]
+        self.assertEqual([payload['type'] for payload in payloads[:3]],
+                         ['request.arrived', 'request.arrived', 'request.rejected'])
+        self.assertEqual(rejected['request_id'], second['request_id'])
+        self.assertEqual(rejected['reason'], 'out_of_resources')
+        completed, = [payload['data'] for payload in payloads if payload['type'] == 'request.completed']
+        self.assertEqual(completed['request_id'], first['request_id'])
+        self.assertEqual(completed['response_time_s'], 2.5)
+
+    def test_final_statistics_can_be_emitted_after_run(self):
+        """Il chiamante pubblica lo snapshot serializzabile dopo il ritorno di run."""
+        function = profiled_function('hello', 1, 1, first_arrival_time=2)
+        simulation = Simulation(Scenario((function,)))
+        notifications: list[Notification] = []
+        self.addCleanup(observer.subscribe(notifications.append))
+
+        self.assertIs(simulation.run(arrivals=1), simulation.metrics)
+        self.assertFalse(any(event.type is NotificationType.FINAL_STATISTICS for event in notifications))
+        observer.notify(simulation.final_statistics())
+
+        event, = [event for event in notifications if event.type is NotificationType.FINAL_STATISTICS]
+        payload = json.loads(json.dumps(event.to_dict()))
+        self.assertEqual(payload['type'], NotificationType.FINAL_STATISTICS)
+        self.assertEqual(payload['data']['outcome'], 'completed')
+        self.assertEqual(payload['data']['metrics'], simulation.metrics_snapshot())
+        self.assertEqual(payload['sim_time_s'], 2)
+
+    def test_failed_calendar_event_is_emitted_and_logged_as_error(self):
+        """L'errore raggiunge observer e logger, poi torna al chiamante."""
+        failure = ValueError('inoltro fallito')
+
+        class FailingInfrastructure(Infrastructure):
+            def submit(self, request):
+                raise failure
+
+        function = profiled_function('hello', 1, 1, first_arrival_time=2)
+        simulation = Simulation(Scenario((function,)), FailingInfrastructure())
+        occurrence, = simulation.start()
+        notifications: list[Notification] = []
+        self.addCleanup(observer.subscribe(notifications.append))
+        self.addCleanup(observer.subscribe(log_notification))
+
+        with self.assertLogs('sim.notifications', level='ERROR') as logs:
+            with self.assertRaises(ValueError) as raised:
+                simulation.engine.step()
+        self.assertIs(raised.exception, failure)
+        self.assertIs(occurrence.status, EventStatus.FAILED)
+        event, = [event for event in notifications if event.type is NotificationType.SIMULATION_ERROR]
+        self.assertIsInstance(event, SimulationError)
+        self.assertIs(event.exception, failure)
+        payload = json.loads(json.dumps(event.to_dict()))
+        self.assertEqual(payload['type'], 'simulation.error')
+        self.assertEqual(payload['sim_time_s'], 2)
+        self.assertEqual(payload['data'], {
+            'failed_event': 'ArrivalEvent',
+            'error_type': 'ValueError',
+            'message': 'inoltro fallito',
+        })
+        self.assertIn('ValueError: inoltro fallito', logs.output[0])
+
     def test_each_arrival_leaves_one_successor_in_the_calendar(self):
         """L'avvio lascia l'orologio a zero, poi ogni step pianifica un arrivo futuro."""
         function = profiled_function('hello', arrival_rate=2.0, service_rate=4.0, first_arrival_time=2.0)
@@ -371,11 +450,16 @@ class SimulationTest(unittest.TestCase):
         node = target.create_node('edge', 'n1', 'edge', idle_timeout=1.5)
         scenario = Scenario((function,), containers={'cleanup_interval': 1})
         simulation = Simulation(scenario, target)
+        notifications: list[Notification] = []
+        unsubscribe = observer.subscribe(notifications.append)
+        self.addCleanup(unsubscribe)
         simulation.start()
         engine = simulation.engine
         engine.run(until=0.5)
         first = target.requests[0]
         self.assertIs(first.container.state, ContainerState.CREATING)
+        # Una prenotazione non è ancora un'accensione.
+        self.assertFalse(any(event.type is NotificationType.CONTAINER_STARTED for event in notifications))
         self.assertEqual(node.resources.used_cpus, 1)
         # Durante il cold start conta una sola istanza, ancora in creazione.
         containers = simulation.metrics_snapshot()['total']['containers']
@@ -398,6 +482,16 @@ class SimulationTest(unittest.TestCase):
         self.assertIs(first.container.state, ContainerState.DESTROYED)
         self.assertEqual(node.resources.warm_pool_used_mem, 0)
         engine.run(until=4.5)
+        # Il passaggio in idle non genera uno spegnimento. Il janitor
+        # pubblica la rimozione effettiva del container al tempo 4.
+        container_events = (NotificationType.CONTAINER_STARTED, NotificationType.CONTAINER_STOPPED)
+        started, stopped = [event.to_dict() for event in notifications if event.type in container_events]
+        self.assertEqual((started['type'], started['sim_time_s']), (NotificationType.CONTAINER_STARTED, 1))
+        self.assertEqual((stopped['type'], stopped['sim_time_s']), (NotificationType.CONTAINER_STOPPED, 4))
+        self.assertEqual(started['run_id'], stopped['run_id'])
+        self.assertEqual(started['data'], stopped['data'])
+        self.assertEqual(stopped['data']['container_id'], first.container.id)
+        unsubscribe()
         snapshot = simulation.metrics_snapshot()
         node_stats = snapshot['nodes_by_ring']['edge']['n1']
         warm = node_stats['time_weighted_resources']['warm_memory_mb']
@@ -412,6 +506,9 @@ class SimulationTest(unittest.TestCase):
         engine.run(until=5)
         self.assertFalse(target.requests[-1].warm)
         self.assertIsNot(target.requests[-1].container, first.container)
+        # Il container successivo diventa pronto, ma il subscriber è scollegato.
+        engine.run(until=6)
+        self.assertEqual(sum(event.type in container_events for event in notifications), 2)
 
     def test_scenario_topology_creates_independent_nodes_for_each_replica(self):
         """Le risorse cambiano nella replica avviata, senza modificare la topologia di un'altra."""
