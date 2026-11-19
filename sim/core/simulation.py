@@ -10,6 +10,7 @@ from sim.model.events import ArrivalEvent, CompletionEvent, ContainerCleanupEven
 from sim.model.infrastructure import Infrastructure
 from sim.model.node import Node
 from sim.model.request import Request, RequestStatus
+from sim.utils.validation import nonnegative_integer
 
 from .engine import SimulationEngine
 from .metrics import SimulationMetrics
@@ -35,6 +36,20 @@ class Simulation:
     def arrivals(self) -> int:
         """Numero di richieste sottoposte all'infrastruttura."""
         return self.metrics.arrivals
+
+    def run(self, arrivals: int | None = None) -> tuple[ScheduledEvent, ...]:
+        """Avvia la replica e la esegue senza orizzonte, salvo un limite di arrivi."""
+        if arrivals is not None:
+            arrivals = nonnegative_integer(arrivals, 'arrivals')
+        first_arrivals = self.start()
+
+        if arrivals is None:
+            self.engine.run()
+        else:
+            while self.arrivals < arrivals and self.engine.step():
+                pass
+
+        return first_arrivals
 
     def start(self) -> tuple[ScheduledEvent, ...]:
         """Pianifica un primo arrivo per ogni funzione, in ordine di configurazione."""

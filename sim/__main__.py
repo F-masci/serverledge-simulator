@@ -5,21 +5,21 @@ from pathlib import Path
 
 from .io.scenario import Scenario
 from .core.simulation import Simulation
-from .utils.validation import nonnegative_integer
 
 
 def main() -> None:
+
+    ### Parsing degli argomenti della riga di comando
     parser = argparse.ArgumentParser(description='Avvia uno scenario di arrivi a eventi discreti')
     parser.add_argument('scenario', type=Path, help='File YAML, TOML o JSON')
     parser.add_argument('--arrivals', type=int, default=0, help='Numero di arrivi da osservare (default: 0)')
     args = parser.parse_args()
 
+    arrivals = args.arrivals
     try:
-        arrivals = nonnegative_integer(args.arrivals, '--arrivals')
-        simulation = Simulation(Scenario.load(args.scenario))
-        first_arrivals = simulation.start()
-        while simulation.arrivals < arrivals and simulation.engine.step():
-            pass
+        scenario = Scenario.load(args.scenario)
+        simulation = Simulation(scenario)
+        first_arrivals = simulation.run(arrivals=arrivals)
     except (OSError, ValueError) as error:
         parser.error(str(error))
 
