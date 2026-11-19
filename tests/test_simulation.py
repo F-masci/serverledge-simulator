@@ -12,6 +12,7 @@ from sim.core.simulation import Simulation
 from sim.model.events import ArrivalEvent
 from sim.model.infrastructure import Infrastructure
 from sim.model.request import RequestStatus
+from sim.utils.welford import TimedWelford, Welford
 
 
 def profiled_function(name, arrival_rate, service_rate, first_arrival_time=0):
@@ -235,6 +236,10 @@ class SimulationTest(unittest.TestCase):
         self.assertFalse(first.warm)
         self.assertEqual(node.resources.used_cpus, 1)
         self.assertEqual(engine.pending_count, 2)
+        in_flight = simulation.metrics_snapshot()
+        self.assertEqual(in_flight['total']['pending'], 1)
+        self.assertIsNone(in_flight['total']['mean_response_time_s'])
+        self.assertEqual(in_flight['nodes_by_ring']['edge']['n1']['busy_memory_mb'], 128)
 
         engine.step()
         self.assertEqual(engine.now, 1)
@@ -257,3 +262,53 @@ class SimulationTest(unittest.TestCase):
         self.assertIs(reused.container, first.container)
         engine.run(until=3.5)
         self.assertIs(reused.status, RequestStatus.COMPLETED)
+        snapshot = simulation.metrics_snapshot()
+        totals = snapshot['total']
+        self.assertEqual(snapshot['time_s'], 3.5)
+        self.assertEqual(totals, snapshot['by_function']['hello'])
+        self.assertEqual((totals['arrivals'], totals['accepted'], totals['completed']), (4, 2, 2))
+        self.assertEqual((totals['cold_starts'], totals['warm_starts'], totals['pending']), (1, 1, 0))
+        self.assertEqual(totals['rejections_by_reason'], {'out_of_resources': 2})
+        self.assertEqual(totals['mean_response_time_s'], 1.5)
+        self.assertEqual(totals['mean_service_time_s'], 1.5)
+        resources = snapshot['nodes_by_ring']['edge']['n1']
+        self.assertEqual((resources['used_cpus'], resources['warm_memory_mb']), (0, 128))
+        self.assertEqual(resources['invocations'], totals)
+        self.assertEqual(resources['by_function']['hello'], totals)
+        self.assertEqual(totals['response_time_variance_s2'], 0)
+        cpu = resources['time_weighted_resources']['used_cpus']
+        self.assertEqual(cpu['observed_time_s'], 3.5)
+        self.assertAlmostEqual(cpu['mean'], 6 / 7)
+        self.assertAlmostEqual(cpu['variance'], 6 / 49)
+        self.assertAlmostEqual(resources['time_weighted_resources']['warm_memory_mb']['mean'], 128 / 7)
+        self.assertEqual(in_flight['total']['pending'], 1)
+
+    def test_scenario_topology_creates_independent_nodes_for_each_replica(self):
+        """Le risorse cambiano nella replica avviata, senza modificare la topologia di un'altra."""
+        path = Path(__file__).resolve().parents[1] / 'examples/scenarios/startup.toml'
+        scenario = Scenario.load(path)
+        first, second = Simulation(scenario), Simulation(scenario)
+        first.start()
+        second.start()
+        first.engine.step()
+        first_nodes = first.metrics_snapshot()['nodes_by_ring']['edge-x86']
+        second_nodes = second.metrics_snapshot()['nodes_by_ring']['edge-x86']
+        self.assertEqual(set(first_nodes), {'edge-1', 'edge-2'})
+        self.assertEqual(sum(node['used_cpus'] for node in first_nodes.values()), 1)
+        self.assertEqual(sum(node['used_cpus'] for node in second_nodes.values()), 0)
+        self.assertEqual(first.metrics_snapshot()['total']['accepted'], 1)
+
+
+class WelfordTest(unittest.TestCase):
+    def test_online_moments_and_timed_snapshot(self):
+        moments = Welford()
+        for offset in (-2, 0, 2):
+            moments.add(10**12 + offset)
+        self.assertEqual(moments.mean, 10**12)
+        self.assertAlmostEqual(moments.variance, 8 / 3)
+
+        occupancy = TimedWelford(0, 2)
+        occupancy.observe(1, 0)
+        snapshot = occupancy.snapshot(4)
+        self.assertEqual((snapshot.weight, snapshot.mean, snapshot.variance), (4, 0.5, 0.75))
+        self.assertEqual(occupancy.snapshot(2).mean, 1)

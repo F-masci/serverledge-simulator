@@ -8,6 +8,7 @@ from sim.model.events import ArrivalEvent, ScheduledEvent
 from sim.model.infrastructure import Infrastructure
 
 from .engine import SimulationEngine
+from .metrics import SimulationMetrics
 
 
 class Simulation:
@@ -16,9 +17,10 @@ class Simulation:
     def __init__(self, scenario: Scenario, infrastructure: Infrastructure | None = None) -> None:
         self._scenario = scenario
         if infrastructure is None:
-            infrastructure = Infrastructure()
+            infrastructure = scenario.build_infrastructure()
         self._engine = SimulationEngine(simulation=self, infrastructure=infrastructure)
-        self._arrivals = 0
+        self._infrastructure = infrastructure
+        self.metrics = SimulationMetrics()
         self._started = False
 
     @property
@@ -28,12 +30,15 @@ class Simulation:
     @property
     def arrivals(self) -> int:
         """Numero di richieste sottoposte all'infrastruttura."""
-        return self._arrivals
+        return self.metrics.arrivals
 
     def start(self) -> tuple[ScheduledEvent, ...]:
         """Pianifica un primo arrivo per ogni funzione, in ordine di configurazione."""
         if self._started:
             raise RuntimeError('Simulazione già avviata')
+        for ring in self._infrastructure.rings.values():
+            for node in ring:
+                self.metrics.register_node(node, self.engine.now)
         first_arrivals = []
         for function in self._scenario.function_registry.values():
             profile = function.profile
@@ -44,6 +49,6 @@ class Simulation:
         self._started = True
         return tuple(first_arrivals)
 
-    def record_arrival(self) -> None:
-        """Conta una richiesta sottoposta all'infrastruttura."""
-        self._arrivals += 1
+    def metrics_snapshot(self) -> dict:
+        """Raccoglie le metriche della replica al tempo corrente."""
+        return self.metrics.snapshot(self.engine.now, self._infrastructure)

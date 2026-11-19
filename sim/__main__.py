@@ -27,7 +27,16 @@ def main() -> None:
     first_time = min(arrival.time for arrival in first_arrivals)
     print(f'Arrivi iniziali schedulati: {len(first_arrivals)} (primo a {first_time} s)')
     if arrivals:
-        print(f'Arrivi elaborati: {simulation.arrivals}')
+        metrics = simulation.metrics_snapshot()['total']
+        print(f"Arrivi elaborati: {metrics['arrivals']}")
+        print(f"Accettate: {metrics['accepted']} | Scartate: {metrics['rejected']} | "
+              f"Completate: {metrics['completed']} | Pendenti: {metrics['pending']}")
+        print(f"Cold start: {metrics['cold_starts']} | Warm start: {metrics['warm_starts']}")
+        if metrics['rejections_by_reason']:
+            reasons = ', '.join(f'{reason}={count}' for reason, count in metrics['rejections_by_reason'].items())
+            print(f'Motivi di scarto: {reasons}')
+        if metrics['mean_response_time_s'] is not None:
+            print(f"Tempo medio di risposta: {metrics['mean_response_time_s']:.6g} s")
         print(f'Prossimo evento: {simulation.engine.next_event_time} s')
 
 

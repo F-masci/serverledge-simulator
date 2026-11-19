@@ -21,3 +21,18 @@ max_concurrency = 2
 supported_archs = ["amd64"]
 arrival_rate = 1.0
 service_rate = 2.0
+
+[[infrastructure.rings]]
+id = "edge-x86"
+arch = "amd64"
+memory_mb = 512
+cpus = 2.0
+
+[[infrastructure.rings.nodes]]
+name = "edge-1"
+area = "edge"
+
+[[infrastructure.rings.nodes]]
+name = "edge-2"
+area = "edge"
+machine_tag = "amd64/standard"

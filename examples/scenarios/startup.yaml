@@ -21,3 +21,15 @@ functions:
   - amd64
   arrival_rate: 1.0
   service_rate: 2.0
+infrastructure:
+  rings:
+  - id: edge-x86
+    arch: amd64
+    memory_mb: 512
+    cpus: 2.0
+    nodes:
+    - name: edge-1
+      area: edge
+    - name: edge-2
+      area: edge
+      machine_tag: amd64/standard

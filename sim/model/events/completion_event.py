@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class CompletionEvent(Event):
     request: Request
+    arrival_time: float
 
     def execute(
         self, simulation: 'Simulation | None', engine: 'SimulationEngine',
@@ -22,3 +23,5 @@ class CompletionEvent(Event):
     ) -> None:
         """Conclude la richiesta al tempo corrente del motore."""
         self.request.complete(engine.now)
+        if simulation is not None:
+            simulation.metrics.record_completion(self.request, engine.now, self.arrival_time)

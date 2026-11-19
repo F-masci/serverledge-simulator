@@ -9,8 +9,28 @@ from types import MappingProxyType
 from typing import TextIO
 
 from sim.model.function import BuiltinRuntime, CustomRuntime, Function, FunctionProfile
+from sim.model.infrastructure import Infrastructure
 from sim.random.streams import RandomStreams
-from sim.utils.validation import finite_time, nonempty_string, nonnegative_integer, positive_integer
+from sim.utils.validation import (
+    finite_time, nonempty_string, nonnegative_integer, positive_integer, positive_number,
+)
+
+
+@dataclass(frozen=True)
+class _NodeSpec:
+    name: str
+    area: str
+    machine_tag: str | None
+
+
+@dataclass(frozen=True)
+class _RingSpec:
+    id: str
+    arch: str
+    memory_mb: int
+    cpus: float
+    replicas: int
+    nodes: tuple[_NodeSpec, ...]
 
 
 @dataclass(frozen=True, init=False)
@@ -20,10 +40,12 @@ class Scenario:
     functions: tuple[Function, ...]
     seed: int = 12345
     function_registry: Mapping[str, Function] = field(init=False, repr=False, compare=False)
+    _rings: tuple[_RingSpec, ...]
 
     def __init__(
         self, functions: Iterable[Function | Mapping[str, object]],
         seed: int = 12345,
+        *, infrastructure: Mapping[str, object] | None = None,
     ) -> None:
         object.__setattr__(self, 'seed', nonnegative_integer(seed, 'seed'))
         registry: dict[str, Function] = {}
@@ -46,6 +68,58 @@ class Scenario:
             raise ValueError('Lo scenario richiede almeno una funzione')
         object.__setattr__(self, 'functions', tuple(registry.values()))
         object.__setattr__(self, 'function_registry', MappingProxyType(registry))
+        object.__setattr__(self, '_rings', self._load_rings(infrastructure))
+
+    def build_infrastructure(self) -> Infrastructure:
+        """Crea ring e nodi nuovi per la replica dallo scenario."""
+        infrastructure = Infrastructure()
+        for ring in self._rings:
+            infrastructure.create_ring(
+                ring.id, arch=ring.arch, memory=ring.memory_mb, cpus=ring.cpus, replicas=ring.replicas,
+            )
+            for node in ring.nodes:
+                infrastructure.create_node(ring.id, node.name, node.area, node.machine_tag)
+        return infrastructure
+
+    def _load_rings(self, infrastructure: object) -> tuple[_RingSpec, ...]:
+        if infrastructure is None:
+            return ()
+        if not isinstance(infrastructure, Mapping) or infrastructure.keys() != {'rings'}:
+            raise ValueError('infrastructure deve contenere rings')
+        definitions = infrastructure['rings']
+        if not isinstance(definitions, list):
+            raise ValueError('infrastructure.rings deve essere una lista')
+
+        rings = {}
+        required = {'id', 'arch', 'memory_mb', 'cpus', 'nodes'}
+        for definition in definitions:
+            if (not isinstance(definition, Mapping) or required - definition.keys()
+                    or definition.keys() - required - {'replicas'}):
+                raise ValueError('Ogni ring richiede id, arch, memory_mb, cpus e nodes; replicas è opzionale')
+            ring_id = nonempty_string(definition['id'], 'ring.id')
+            if ring_id in rings:
+                raise ValueError(f'Ring già definito: {ring_id}')
+            node_definitions = definition['nodes']
+            if not isinstance(node_definitions, list):
+                raise ValueError(f'I nodi del ring {ring_id} devono essere una lista')
+            nodes = {}
+            for node in node_definitions:
+                if (not isinstance(node, Mapping) or {'name', 'area'} - node.keys()
+                        or node.keys() - {'name', 'area', 'machine_tag'}):
+                    raise ValueError('Ogni nodo richiede name e area; machine_tag è opzionale')
+                name = nonempty_string(node['name'], 'node.name')
+                if name in nodes:
+                    raise ValueError(f'Nodo già definito nel ring {ring_id}: {name}')
+                tag = nonempty_string(node['machine_tag'], 'node.machine_tag') if 'machine_tag' in node else None
+                nodes[name] = _NodeSpec(name, nonempty_string(node['area'], 'node.area'), tag)
+            rings[ring_id] = _RingSpec(
+                ring_id, nonempty_string(definition['arch'], 'ring.arch'),
+                positive_integer(definition['memory_mb'], 'ring.memory_mb'),
+                positive_number(finite_time(definition['cpus'], 'ring.cpus'), 'ring.cpus'),
+                positive_integer(definition.get('replicas', 128), 'ring.replicas'),
+                tuple(nodes.values()),
+            )
+        return tuple(rings.values())
 
     def get_function(self, name: str) -> Function | None:
         """Cerca una funzione registrata per nome."""
@@ -68,7 +142,7 @@ class Scenario:
             data = reader(source)
         if not isinstance(data, dict):
             raise ValueError('Lo scenario deve essere una tabella')
-        if unknown := data.keys() - {'functions', 'function', 'seed'}:
+        if unknown := data.keys() - {'functions', 'function', 'seed', 'infrastructure'}:
             raise ValueError(f'Parametri scenario sconosciuti: {sorted(map(str, unknown))}')
 
         if 'function' in data and 'functions' in data:
@@ -80,6 +154,7 @@ class Scenario:
         return cls(
             functions=definitions,
             seed=data.get('seed', 12345),
+            infrastructure=data.get('infrastructure'),
         )
 
     @staticmethod

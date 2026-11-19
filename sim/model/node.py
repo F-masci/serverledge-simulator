@@ -242,7 +242,7 @@ class Node:
         request._ensure_new()
         container = self.acquire(request.function)
         if container is None:
-            request._reject('out_of_resources')
+            request._reject('out_of_resources', node=self)
             return False
         request._accept(self, container, warm=container.state is not ContainerState.CREATING)
         return True

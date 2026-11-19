@@ -67,8 +67,9 @@ class Request:
         self._warm = warm
         self._status = RequestStatus.ACCEPTED
 
-    def _reject(self, reason: str) -> None:
+    def _reject(self, reason: str, *, node: 'Node | None' = None) -> None:
         self._ensure_new()
+        self._node = node
         self._rejection_reason = reason
         self._status = RequestStatus.REJECTED
 

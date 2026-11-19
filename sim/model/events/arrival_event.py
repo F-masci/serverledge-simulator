@@ -40,5 +40,5 @@ class ArrivalEvent(Event):
                 # Il cold start è istantaneo finché lo scenario non ne definisce la durata.
                 assert request.container is not None
                 node.creation_succeeded(request.container, engine.now)
-            engine.schedule_after(duration, CompletionEvent(request))
-        simulation.record_arrival()
+            engine.schedule_after(duration, CompletionEvent(request, arrival_time=engine.now))
+        simulation.metrics.record_admission(request, engine.now)
