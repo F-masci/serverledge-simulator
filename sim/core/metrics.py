@@ -28,7 +28,7 @@ class _InvocationMetrics:
     def arrivals(self) -> int:
         return self.waiting + self.accepted + self.rejections.total()
 
-    def record_admission(self, request: Request) -> None:
+    def record_submission(self, request: Request) -> None:
         if request.status is RequestStatus.QUEUED:
             self.waiting += 1
             self.queued += 1
@@ -257,15 +257,15 @@ class SimulationMetrics:
             yield stats.invocations
             yield stats.by_function[name]
 
-    def record_admission(self, request: Request, now: float) -> None:
+    def record_submission(self, request: Request, now: float) -> None:
         for stats in self._invocations_for(request, now):
-            stats.record_admission(request)
+            stats.record_submission(request)
 
     def record_dequeue(self, request: Request, now: float) -> None:
         for stats in self._invocations_for(request, now):
             stats.waiting -= 1
             stats.queue_wait.add(now - request.arrival_time)
-            stats.record_admission(request)
+            stats.record_submission(request)
 
     def record_completion(self, request: Request, now: float, arrival_time: float) -> None:
         service_time = request.service_duration

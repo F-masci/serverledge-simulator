@@ -47,16 +47,15 @@ class ArrivalEvent(Event):
     def _handle_accepted(self, request: Request, node: Node) -> None:
         """Gestisce l’accettazione della richiesta da parte del nodo."""
         now = self.ctx.engine.now
-        self.ctx.metrics.record_admission(request, now)
-        self.ctx.observer.notify_request_accepted(request, node)
+        self.ctx.metrics.record_submission(request, now)
+        self.ctx.observer.notify_request_accepted(request)
         if self.on_accepted is not None:
             self.on_accepted(request, node)
 
     def _handle_rejected(self, request: Request) -> None:
         """Gestisce il rifiuto della richiesta da parte del nodo."""
         now = self.ctx.engine.now
-        # self.ctx.metrics.record_rejection(request, now)
+        self.ctx.metrics.record_submission(request, now)
         self.ctx.observer.notify_request_rejected(request)
         if self.on_rejected is not None:
             self.on_rejected(request)
-

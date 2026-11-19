@@ -64,7 +64,7 @@ class _Observer:
         )
         self.notify(notification)
 
-    def notify_request_accepted(self, request: Request, node: Node):
+    def notify_request_accepted(self, request: Request):
         """Notifica l'accettazione di una richiesta da parte di un nodo."""
         ctx = self._ensure_context()
         notification = RequestAccepted(
@@ -72,7 +72,7 @@ class _Observer:
             sim_time_s=ctx.engine.now,
             request_id=request.id,
             function=request.function.name,
-            node_id=node.id.key,
+            node_id=request.node.id.key if request.node is not None else None,
         )
         self.notify(notification)
 
