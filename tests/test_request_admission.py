@@ -42,3 +42,30 @@ class RequestAdmissionTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             node.submit(third)
         self.assertEqual(third.container.requests_count, 1)
+
+    def test_callbacks_observe_request_after_each_transition(self):
+        """La FIFO ammette la richiesta e i callback vedono lo stato aggiornato."""
+        node = Node('n', 128, 1, 'edge', 'amd64', queue_capacity=1)
+        fun = Function('f', 128, 1, BuiltinRuntime('python314'))
+        active, waiting, rejected = (Request(fun) for _ in range(3))
+        transitions = []
+        waiting.on_queued = lambda request: self.assertIs(request.node, node)
+        waiting.on_accepted = lambda request: self.assertIs(request.container, active.container)
+        waiting.on_completed = lambda request: self.assertIs(request.container.state, ContainerState.IDLE)
+        waiting.on_state_changed = lambda request, previous, current: transitions.append(
+            (previous, current, request.status)
+        )
+        rejected.on_rejected = lambda request: self.assertEqual(request.rejection_reason, 'out_of_resources')
+
+        self.assertTrue(node.submit(active))
+        node.creation_succeeded(active.container, 0)
+        self.assertTrue(node.submit(waiting))
+        self.assertFalse(node.submit(rejected))
+        active.complete(1)
+        waiting.complete(2)
+
+        self.assertEqual(transitions, [
+            (RequestStatus.CREATED, RequestStatus.QUEUED, RequestStatus.QUEUED),
+            (RequestStatus.QUEUED, RequestStatus.ACCEPTED, RequestStatus.ACCEPTED),
+            (RequestStatus.ACCEPTED, RequestStatus.COMPLETED, RequestStatus.COMPLETED),
+        ])

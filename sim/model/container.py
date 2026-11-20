@@ -1,6 +1,7 @@
 """Stato logico di un container Docker, senza accesso al daemon."""
 from collections.abc import Callable
 from enum import Enum
+import json
 from .function import Function
 from ..utils.validation import finite_time
 
@@ -85,21 +86,17 @@ class DockerContainer:
         if self._state is not ContainerState.CREATING:
             raise ValueError('Container non in creazione')
         
-        # Aggiorna lo stato e il contatore delle richieste in base al parametro idle
-        self._state = ContainerState.IDLE if idle else ContainerState.BUSY
+        # Imposta il contatore e la scadenza prima di notificare la creazione.
+        state = ContainerState.IDLE if idle else ContainerState.BUSY
         self._requests_count = 0 if idle else 1
         self._expiration_time = now + timeout if idle else None
-        
-        # Invoca i callback se definiti
-        if self.on_created:
-            self.on_created(self)
-        if self.on_state_changed:
-            self.on_state_changed(self, ContainerState.CREATING, self._state)
-        if self.on_idle and self._state is ContainerState.IDLE:
+        self._handle_change_status(state, self.on_created)
+
+        # Dopo la creazione, notifica anche lo stato operativo iniziale.
+        if self.on_idle is not None and self._state is ContainerState.IDLE:
             self.on_idle(self)
-        if self.on_busy and self._state is ContainerState.BUSY:
+        if self.on_busy is not None and self._state is ContainerState.BUSY:
             self.on_busy(self)
-        
 
     def acquire(self) -> None:
         """Segna il container come occupato da una richiesta."""
@@ -108,48 +105,61 @@ class DockerContainer:
         if self.requests_count >= self.function.max_concurrency:
             raise ValueError('Concorrenza massima raggiunta')
         
-        # Aggiorna lo stato e il contatore delle richieste
+        # Ogni acquisizione notifica on_busy, anche con altre richieste attive.
         self._requests_count += 1
-        self._state = ContainerState.BUSY
         self._expiration_time = None
-        
-        # Invoca i callback se definiti
-        if self.on_busy:
-            self.on_busy(self)
-        if self.on_state_changed and self._requests_count == 1:  # Solo se il container era idle prima
-            self.on_state_changed(self, ContainerState.IDLE, self._state)
+        self._handle_change_status(ContainerState.BUSY, self.on_busy)
 
     def complete(self, now: float, timeout: float) -> None:
         """Segna il completamento di una richiesta e aggiorna lo stato del container."""
         if self._state is not ContainerState.BUSY:
             raise ValueError('Nessuna richiesta attiva')
-        
-        # Aggiorna il contatore delle richieste e lo stato del container
+
+        # Il container torna idle alla conclusione dell'ultima richiesta attiva.
         self._requests_count -= 1
         if self.requests_count == 0:
-            self._state = ContainerState.IDLE
             self._expiration_time = now + timeout
-            
-        # Invoca i callback se definiti
-        if self.on_idle and self._state is ContainerState.IDLE:
-            self.on_idle(self)
-        if self.on_state_changed and self.requests_count == 0:  # Solo se il container era busy prima
-            self.on_state_changed(self, ContainerState.BUSY, self._state)
+            self._handle_change_status(ContainerState.IDLE, self.on_idle)
 
     def destroy(self) -> None:
         """Segna il container come distrutto."""
         if self._state not in (ContainerState.IDLE, ContainerState.CREATING):
             raise ValueError('Distruzione ordinaria consentita solo per idle o creazione fallita')
-        
-        # Aggiorna lo stato del container a DESTROYED
-        prevState = self._state
-        self._state = ContainerState.DESTROYED
-        
-        # Invoca i callback se definiti
-        if self.on_destroyed:
-            self.on_destroyed(self)
-        if self.on_state_changed:
-            self.on_state_changed(self, prevState, self._state)
+
+        self._handle_change_status(ContainerState.DESTROYED, self.on_destroyed)
+
+    def _handle_change_status(
+        self, state: ContainerState, callback: Callable[[DockerContainer], None] | None,
+    ) -> None:
+        """Aggiorna lo stato e invoca le callback nell'ordine previsto."""
+        previous_state = self._state
+        self._state = state
+
+        # La callback specifica precede la notifica del cambio di stato.
+        if callback is not None:
+            callback(self)
+        if self.on_state_changed is not None and previous_state is not state:
+            self.on_state_changed(self, previous_state, state)
+
+    def __str__(self) -> str:
+        """Restituisce una descrizione leggibile del container."""
+        fields = self.to_dict()
+        details = ', '.join(f'{name}={value}' for name, value in fields.items() if value is not None)
+        return f'DockerContainer({details})'
+
+    def to_dict(self) -> dict:
+        """Restituisce lo stato corrente del container in un formato serializzabile."""
+        return {
+            'id': self.id,
+            'function': self.function.name,
+            'state': self.state.value,
+            'requests_count': self.requests_count,
+            'expiration_time_s': self.expiration_time,
+        }
+
+    def to_json(self) -> str:
+        """Serializza il container per la stampa o l'esportazione."""
+        return json.dumps(self.to_dict(), ensure_ascii=False, allow_nan=False)
 
     def __repr__(self) -> str:
         return f'DockerContainer({self.id!r}, {self._state.value}, requests={self.requests_count})'

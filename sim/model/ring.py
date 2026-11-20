@@ -107,11 +107,11 @@ class ArchitectureRing:
 
     def submit(self, request: Request) -> Node | None:
         """Tenta l'ammissione in ordine di hash fino al primo nodo disponibile."""
-        request._ensure_new()
+        request.ensure_created()
         candidates = self._candidates(request.function)
         primary = next(candidates, None)
         if primary is None:
-            request._reject('no_destination')
+            request.reject('no_destination')
             return None
 
         for node in chain((primary,), candidates):

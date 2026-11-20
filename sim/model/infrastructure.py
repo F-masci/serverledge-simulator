@@ -25,49 +25,57 @@ class Infrastructure:
     def load_balancer(self) -> LoadBalancer:
         return self._load_balancer
 
-    def create_ring(
-        self, ring_id: str, *, arch: str | None = None,
-        memory: int | None = None, cpus: float | None = None, replicas: int | None = None,
-    ) -> ArchitectureRing:
-        """Crea un anello configurato o restituisce quello identificato dall'ID.
+    def get_ring(self, ring_id: str) -> ArchitectureRing | None:
+        """Restituisce l'anello identificato dall'ID, o None se non esiste."""
+        return self._rings.get(ring_id)
 
-        Un nuovo ID richiede architettura e capacità. Per un ID esistente
-        eventuali parametri devono coincidere: non si riconfigura il ring.
-        """
+    def create_ring(
+        self,
+        ring_id: str,
+        *,
+        arch: str | None = None,
+        memory: int | None = None,
+        cpus: float | None = None,
+        replicas: int | None = None,
+    ) -> ArchitectureRing:
+        """Crea un anello configurato o restituisce quello identificato dall'ID."""
         ring_id = nonempty_string(ring_id, 'ring_id')
-        if ring_id in self._rings:
-            ring = self._rings[ring_id]
-            for field, value in (('arch', arch), ('memory', memory), ('cpus', cpus), ('replicas', replicas)):
-                if value is not None and value != getattr(ring, field):
-                    raise ValueError(f'Configurazione diversa per l\'anello {ring_id}: {field}')
+
+        # Se l'anello esiste già, restituiscilo senza modificare le capacità.
+        ring = self.get_ring(ring_id)
+        if ring is not None:
             return ring
+
+        # Se l'anello non esiste, richiede architettura, CPU e memoria per crearlo.
         if arch is None or memory is None or cpus is None:
             raise ValueError('Un nuovo anello richiede architettura, CPU e memoria')
-        ring = ArchitectureRing(ring_id, arch, memory, cpus, 128 if replicas is None else replicas)
+        replicas = 128 if replicas is None else replicas
+        ring = ArchitectureRing(ring_id, arch, memory, cpus, replicas)
         self._rings[ring_id] = ring
         return ring
 
-    def create_node(
-        self, ring_id: str, name: str, area: str, machine_tag: str | None = None,
-        *, idle_timeout: float = 600, queue_capacity: int = 0,
-    ) -> Node:
-        """Ottiene il ring tramite create_ring e gli delega la creazione del nodo.
 
-        Il ring deve essere già configurato: le capacità non sono parametri
-        del singolo nodo e non possono essere sovrascritte alla creazione.
-        """
-        ring = self.create_ring(ring_id)
+    def create_node(
+        self,
+        ring_id: str,
+        name: str,
+        area: str,
+        machine_tag: str | None = None,
+        *,
+        idle_timeout: float = 600,
+        queue_capacity: int = 0,
+    ) -> Node:
+        """Crea un nodo nell'anello specificato, creando l'anello se necessario."""
+        ring = self.get_ring(ring_id)
+        if ring is None:
+            raise ValueError(f'Anello non trovato: {ring_id}')
         return ring.create_node(name, area, machine_tag, idle_timeout=idle_timeout, queue_capacity=queue_capacity)
 
     def submit(self, request: Request) -> Node | None:
-        """Chiede al bilanciatore il ring e delega a esso l'inoltro al nodo.
-
-        Restituisce il nodo che ha ammesso o accodato la richiesta, oppure None
-        se la richiesta è stata rifiutata.
-        """
-        request._ensure_new()
+        """Inoltra una richiesta all'infrastruttura."""
+        request.ensure_created()
         ring = self._load_balancer.submit(request, self._rings.values())
         if ring is None:
-            request._reject('no_destination')
+            request.reject('no_destination')
             return None
         return ring.submit(request)

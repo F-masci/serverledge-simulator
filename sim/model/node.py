@@ -283,19 +283,19 @@ class Node:
         per provare altri nodi. Una creazione resta CREATING fino
         alla notifica esplicita del suo esito, senza esecuzione automatica.
         """
-        request._ensure_new()
+        request.ensure_created()
         container = self.acquire(request.function)
         if container is None:
             return self.enqueue_or_reject(request) if reject_on_failure else False
-        request._accept(self, container, warm=container.state is not ContainerState.CREATING)
+        request.accept(self, container, warm=container.state is not ContainerState.CREATING)
         return True
 
     def enqueue_or_reject(self, request: Request) -> bool:
         """Mette in attesa sul nodo destinatario se resta posto nella FIFO."""
         if len(self._queue) >= self._queue_capacity:
-            request._reject('out_of_resources', node=self)
+            request.reject('out_of_resources', node=self)
             return False
-        request._enqueue(self)
+        request.enqueue(self)
         self._queue.append(request)
         return True
 
@@ -310,7 +310,7 @@ class Node:
 
     def _dequeue(self, container: DockerContainer) -> None:
         request = self._queue.popleft()
-        request._accept(self, container, warm=container.state is not ContainerState.CREATING)
+        request.accept(self, container, warm=container.state is not ContainerState.CREATING)
         if self.on_dequeue is not None:
             self.on_dequeue(request)
 
