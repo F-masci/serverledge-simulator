@@ -20,16 +20,13 @@ class Infrastructure:
         ### Callback ###
         self.on_ring_created: Callable[[Infrastructure, ArchitectureRing], None] | None = None
         self.on_node_created: Callable[[Infrastructure, ArchitectureRing, Node], None] | None = None
+        self.on_node_removed: Callable[[Infrastructure, ArchitectureRing, Node], None] | None = None
         self.on_request_submitted: Callable[[Infrastructure, Request, Node | None], None] | None = None
 
     @property
     def rings(self) -> Mapping[str, ArchitectureRing]:
         """Vista non modificabile dell'associazione ID → anello."""
         return MappingProxyType(self._rings)
-
-    @property
-    def load_balancer(self) -> LoadBalancer:
-        return self._load_balancer
 
     def get_ring(self, ring_id: str) -> ArchitectureRing | None:
         """Restituisce l'anello identificato dall'ID, o None se non esiste."""
@@ -72,6 +69,18 @@ class Infrastructure:
         node = ring.create_node(name, area, machine_tag, idle_timeout=idle_timeout, queue_capacity=queue_capacity)
         if self.on_node_created is not None:
             self.on_node_created(self, ring, node)
+        return node
+
+    def remove_node(self, ring_id: str, name: str) -> Node:
+        """Rimuove il nodo dall'anello specificato e restituisce il nodo rimosso."""
+        ring = self.get_ring(ring_id)
+        if ring is None:
+            raise ValueError(f'Anello non trovato: {ring_id}')
+
+        # L'anello aggiorna il routing prima della notifica.
+        node = ring.remove_node(name)
+        if self.on_node_removed is not None:
+            self.on_node_removed(self, ring, node)
         return node
 
     def submit(self, request: Request) -> Node | None:
