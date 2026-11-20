@@ -4,9 +4,10 @@ from collections.abc import Callable
 import logging
 from typing import TYPE_CHECKING
 
+from . import RequestCompleted
 from .notifications import Notification, RequestArrived, RequestAccepted, RequestRejected
 from ..model.request import Request
-from ..model.node import Node
+from ..utils.ensure import ensure_node, ensure_container
 
 if TYPE_CHECKING:
     from sim.core.simulation import SimulationContext
@@ -42,14 +43,14 @@ class _Observer:
             except Exception:
                 logging.getLogger(__name__).exception('Errore nel subscriber di %s', notification.type)
 
+    #----------------------------------#
+    #   Custom notifications methods   #
+    # ----------------------------------#
+
     def _ensure_context(self) -> 'SimulationContext':
         if self._ctx is None:
             raise RuntimeError('Observer non associato a un contesto di simulazione')
         return self._ctx
-
-    #----------------------------------#
-    #   Custom notifications methods   #
-    # ----------------------------------#
 
     ## Arrival Requests ##
 
@@ -67,25 +68,45 @@ class _Observer:
     def notify_request_accepted(self, request: Request):
         """Notifica l'accettazione di una richiesta da parte di un nodo."""
         ctx = self._ensure_context()
+        node = ensure_node(request)
         notification = RequestAccepted(
             run_id=ctx.simulation.run_id,
             sim_time_s=ctx.engine.now,
             request_id=request.id,
             function=request.function.name,
-            node_id=request.node.id.key if request.node is not None else None,
+            node_id=node.id.key,
         )
         self.notify(notification)
 
     def notify_request_rejected(self, request: Request):
         """Notifica il rifiuto di una richiesta."""
         ctx = self._ensure_context()
+        node = ensure_node(request)
         notification = RequestRejected(
             run_id=ctx.simulation.run_id,
             sim_time_s=ctx.engine.now,
             request_id=request.id,
             function=request.function.name,
             reason=request.rejection_reason or 'unknown',
-            node_id=request.node.id.key if request.node is not None else None,
+            node_id=node.id.key,
+        )
+        self.notify(notification)
+
+    ### Completion Requests ###
+
+    def notify_request_completed(self, request: Request):
+        """Notifica il completamento di una richiesta."""
+        ctx = self._ensure_context()
+        node = ensure_node(request)
+        container = ensure_container(request)
+        notification = RequestCompleted(
+            run_id=ctx.simulation.run_id,
+            sim_time_s=ctx.engine.now,
+            request_id=request.id,
+            function=request.function.name,
+            node_id=node.id.key,
+            container_id=container.id.key,
+            response_time_s=ctx.engine.now - request.arrival_time,
         )
         self.notify(notification)
 

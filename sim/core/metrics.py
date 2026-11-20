@@ -267,11 +267,11 @@ class SimulationMetrics:
             stats.queue_wait.add(now - request.arrival_time)
             stats.record_submission(request)
 
-    def record_completion(self, request: Request, now: float, arrival_time: float) -> None:
+    def record_completion(self, request: Request, now: float) -> None:
         service_time = request.service_duration
         assert service_time is not None  # Le richieste simulate hanno una durata campionata.
         for stats in self._invocations_for(request, now):
-            stats.record_completion(now - arrival_time, service_time)
+            stats.record_completion(now - request.arrival_time, service_time)
 
     def snapshot(self, now: float, infrastructure: Infrastructure) -> dict:
         """Restituisce e separa le metriche dei nodi per ring e nome."""
