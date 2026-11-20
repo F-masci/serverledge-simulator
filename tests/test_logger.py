@@ -2,7 +2,7 @@ import logging
 import unittest
 
 from sim.observer import RequestArrived
-from sim.observer.logger import log_notification
+from sim.utils.logger import log_notification
 
 
 class NotificationLoggerTest(unittest.TestCase):

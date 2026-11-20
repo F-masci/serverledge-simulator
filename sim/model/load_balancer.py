@@ -26,7 +26,7 @@ class LoadBalancer(ABC):
         return next(iter(self.candidate_rings(request, rings)), None)
 
     def candidate_rings(
-        self, request: Request, rings: Iterable[ArchitectureRing], *, area: str | None = None,
+        self, request: Request, rings: Iterable[ArchitectureRing],
     ) -> tuple[ArchitectureRing, ...]:
         """Restituisce il primario seguito dai ring compatibili in ordine di registrazione."""
         function = request.function
@@ -35,8 +35,7 @@ class LoadBalancer(ABC):
             if len(ring)
             and function.supports_arch(ring.arch)
             and any(
-                (area is None or node.id.area == area)
-                and function.supports_machine_tag(node.id.machine_tag)
+                function.supports_machine_tag(node.id.machine_tag)
                 for node in ring
             )
         )

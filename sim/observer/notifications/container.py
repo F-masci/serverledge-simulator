@@ -1,8 +1,11 @@
 """Notifiche del ciclo di vita dei container."""
 
-from dataclasses import dataclass, field
-from logging import INFO
+from dataclasses import asdict, dataclass, field
+from logging import DEBUG, INFO
 
+from sim.model.container import ContainerState
+
+from .node import ResourceSnapshot
 from .notification import Notification, NotificationType
 
 
@@ -40,7 +43,36 @@ class _ContainerNotification(Notification):
 
 
 @dataclass(frozen=True)
-class ContainerStarted(_ContainerNotification):
+class ContainerStateChanged(_ContainerNotification):
+    """Una transizione del container con le prenotazioni aggiornate del nodo."""
+
+    type = NotificationType.CONTAINER_STATE_CHANGED
+    level = DEBUG
+
+    previous: ContainerState | None = field(default=None, kw_only=True)
+    state: ContainerState | None = field(default=None, kw_only=True)
+    resources: ResourceSnapshot | None = field(default=None, kw_only=True)
+
+    def __str__(self) -> str:
+        text = super().__str__()
+        if self.state is None:
+            return text
+        previous = self.previous.value if self.previous is not None else 'none'
+        return f'{text} stato={previous}→{self.state.value}'
+
+    def to_dict(self) -> dict:
+        payload = super().to_dict()
+        if self.state is not None:
+            payload['data'].update(
+                previous=self.previous.value if self.previous is not None else None,
+                state=self.state.value,
+                resources=asdict(self.resources) if self.resources is not None else None,
+            )
+        return payload
+
+
+@dataclass(frozen=True)
+class ContainerStarted(ContainerStateChanged):
     """Un nuovo container è pronto per l'esecuzione o il pool idle."""
 
     type = NotificationType.CONTAINER_STARTED
@@ -48,7 +80,7 @@ class ContainerStarted(_ContainerNotification):
 
 
 @dataclass(frozen=True)
-class ContainerStopped(_ContainerNotification):
+class ContainerStopped(ContainerStateChanged):
     """Un container già avviato è stato rimosso e ha liberato la RAM."""
 
     type = NotificationType.CONTAINER_STOPPED

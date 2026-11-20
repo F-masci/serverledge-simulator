@@ -2,11 +2,16 @@
 
 from bisect import bisect_left
 from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING
 
 from .function import Function
 from .node import Node
 from .request import Request
 from ..utils.validation import nonempty_string, positive_integer, positive_number
+
+if TYPE_CHECKING:
+    from .region import Region
+    from .infrastructure import Infrastructure
 
 
 class ArchitectureRing:
@@ -16,8 +21,12 @@ class ArchitectureRing:
     La selezione usa consistent hashing con repliche virtuali.
     """
 
-    def __init__(self, ring_id: str, arch: str, memory: int, cpus: float, replicas: int = 128) -> None:
+    def __init__(
+        self, ring_id: str, arch: str, memory: int, cpus: float, replicas: int = 128, *,
+        infrastructure: 'Infrastructure | None' = None,
+    ) -> None:
         self._id = nonempty_string(ring_id, 'ring_id')
+        self._infrastructure = infrastructure
         self._arch = nonempty_string(arch, 'arch')
         self._memory = positive_integer(memory, 'memory')
         self._cpus = positive_number(cpus, 'cpus')
@@ -34,6 +43,15 @@ class ArchitectureRing:
     @property
     def id(self) -> str:
         return self._id
+
+    @property
+    def infrastructure(self) -> 'Infrastructure':
+        assert self._infrastructure is not None, 'Anello non associato a un\'infrastruttura'
+        return self._infrastructure
+
+    @property
+    def region(self) -> 'Region':
+        return self.infrastructure.region
 
     @property
     def memory(self) -> int:
@@ -61,19 +79,18 @@ class ArchitectureRing:
         return self._replicas
 
     def create_node(
-        self, name: str, area: str, machine_tag: str | None = None,
+        self, name: str, machine_tag: str | None = None,
         *, idle_timeout: float = 600, queue_capacity: int = 0,
     ) -> Node:
         """Crea un nodo con le capacità e l'architettura dell'anello."""
         name = nonempty_string(name, 'name')
-        nonempty_string(area, 'area')
 
         if any(node.id.key == name for node in self._nodes):
             raise ValueError(f'Nodo già presente nell\'anello: {name}')
 
         node = Node(
-            name, self.memory, self.cpus, area, self.arch, machine_tag,
-            idle_timeout=idle_timeout, queue_capacity=queue_capacity,
+            name, self.memory, self.cpus, self.arch, machine_tag,
+            idle_timeout=idle_timeout, queue_capacity=queue_capacity, ring=self,
         )
 
         # Registra le repliche virtuali e il nodo prima di notificare la creazione.
@@ -101,6 +118,7 @@ class ArchitectureRing:
                 del self._targets[position]
                 self._positions.pop(bisect_left(self._positions, position))
 
+        node._ring = None
         if self.on_node_removed is not None:
             self.on_node_removed(self, node)
         return node
@@ -110,7 +128,7 @@ class ArchitectureRing:
         return next(self._candidates(function), None)
 
     def submit(
-        self, request: Request, *, area: str | None = None,
+        self, request: Request, *,
         schedule: Callable[[Request, Node], Node | None] | None = None,
     ) -> Node | None:
         """Seleziona un nodo idoneo con l'hash e gli consegna l'invocazione."""
@@ -119,13 +137,14 @@ class ArchitectureRing:
         # TODO: separare le risorse correnti dalla vista del proxy, come la
         # NodeMetricCache Go aggiornata dai polling e dalle risposte dei nodi.
         node = next((
-            candidate for candidate in self._candidates(function, area=area)
+            candidate for candidate in self._candidates(function)
             if candidate.resources.available_memory >= function.memory_mb
             and candidate.resources.available_cpus >= function.cpu_demand
         ), None)
         if node is None:
             return None
 
+        request.select_ring(self)
         if schedule is not None:
             destination = schedule(request, node)
         else:
@@ -134,14 +153,13 @@ class ArchitectureRing:
             self.on_request_submitted(self, request, destination)
         return destination
 
-    def _candidates(self, function: Function, *, area: str | None = None) -> Iterator[Node]:
+    def _candidates(self, function: Function) -> Iterator[Node]:
         """Visita i nodi fisici una sola volta, a partire dal successore dell'hash."""
         matching = None
-        if function.tag_pattern or area is not None:
+        if function.tag_pattern:
             matching = {
                 node for node in self._nodes
-                if (area is None or node.id.area == area)
-                and function.supports_machine_tag(node.id.machine_tag)
+                if function.supports_machine_tag(node.id.machine_tag)
             }
             if not matching:
                 return

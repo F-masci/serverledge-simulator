@@ -12,12 +12,15 @@ Riferimenti Infrascaler:
 from dataclasses import replace
 import json
 from pathlib import Path
+import subprocess
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
 from sim.io.scenario import Scenario
 from sim.model.function import BuiltinRuntime, CustomRuntime, Function, FunctionProfile
+from sim.core.metrics import SimulationMetrics
 from sim.core.simulation import Simulation
 from sim.model.container import ContainerState
 from sim.model.request import RequestStatus
@@ -34,7 +37,7 @@ def profiled_function(name, arrival_rate, service_rate, first_arrival_time=0):
 
 EDGE = {'rings': [{
     'id': 'edge', 'arch': 'amd64', 'memory_mb': 128, 'cpus': 1,
-    'nodes': [{'name': 'n1', 'area': 'edge'}],
+    'nodes': [{'name': 'n1'}],
 }]}
 
 
@@ -94,6 +97,28 @@ class SimulationTest(unittest.TestCase):
         self.assertEqual(payload['data']['metrics'], simulation.metrics_snapshot())
         self.assertEqual(payload['sim_time_s'], 2)
 
+    def test_cli_prints_one_structured_report_and_keeps_logs_separate(self):
+        root = Path(__file__).resolve().parents[1]
+        scenario = 'examples/scenarios/regional-offloading.toml'
+        command = [sys.executable, '-m', 'sim', scenario, '--arrivals', '5']
+        for level in ('WARNING', 'INFO'):
+            with self.subTest(level=level):
+                result = subprocess.run(
+                    [*command, '--log-level', level], cwd=root,
+                    capture_output=True, text=True, check=True, timeout=10,
+                )
+                self.assertEqual(result.stdout.count('Riepilogo simulazione'), 1)
+                self.assertIn(scenario, result.stdout)
+                self.assertRegex(result.stdout, r'(?m)^    In transito +1$')
+                self.assertRegex(result.stdout, r'(?m)^  Risposta\s+0\.625 s$')
+                self.assertIn('Invocazioni per funzione', result.stdout)
+                self.assertIn('edge (primaria)', result.stdout)
+                self.assertIn('Offloading interregionale', result.stdout)
+                self.assertRegex(result.stdout, r'(?m)^  edge\s+cloud\s+5$')
+                self.assertNotIn('request.arrived', result.stdout)
+                self.assertNotIn('simulation.final_statistics', result.stderr)
+                self.assertEqual('request.arrived' in result.stderr, level == 'INFO')
+
     def test_cli_reports_simulation_failure(self):
         failure = ValueError('inoltro fallito')
         scenario = Scenario((profiled_function('hello', 1, 1),))
@@ -147,6 +172,14 @@ class SimulationTest(unittest.TestCase):
             observations.append([(request.arrival_time, request.service_duration) for request in requests])
         self.assertEqual(observations[0], observations[1])
 
+    def test_metrics_subscriber_failure_stops_the_replica(self):
+        failure = RuntimeError('metriche non aggiornate')
+        scenario = Scenario((profiled_function('hello', 1, 1),))
+        with patch.object(SimulationMetrics, '_record_invocation', side_effect=failure):
+            with self.assertRaises(RuntimeError) as raised:
+                Simulation(scenario).run(arrivals=1)
+        self.assertIs(raised.exception, failure)
+
     def test_example_scenario_formats_define_the_same_workload(self):
         examples = Path(__file__).resolve().parents[1] / 'examples/scenarios'
         scenario = Scenario.load(examples / 'startup.toml')
@@ -177,7 +210,7 @@ class SimulationTest(unittest.TestCase):
     def test_simulation_seed_controls_ring_selection(self):
         infrastructure = {'rings': [
             {'id': name, 'arch': 'amd64', 'memory_mb': 512, 'cpus': 2,
-             'nodes': [{'name': name, 'area': 'edge'}]}
+             'nodes': [{'name': name}]}
             for name in ('first', 'second')
         ]}
         fun = Function('hello', 128, 1, BuiltinRuntime('python314'), profile=FunctionProfile(
@@ -365,6 +398,33 @@ class SimulationTest(unittest.TestCase):
         totals = simulation.metrics_snapshot()['total']
         self.assertEqual((totals['accepted'], totals['warm_starts']), (2, 1))
 
+    def test_local_queue_metrics_follow_queued_and_accepted_notifications(self):
+        function = Function('hello', 128, 1, BuiltinRuntime('python314'), profile=FunctionProfile(
+            arrival_rate=1, service_rate=0.4, first_arrival_time=0,
+            arrival_distribution='deterministic', service_distribution='deterministic',
+        ))
+        simulation = Simulation(Scenario(
+            (function,), infrastructure=EDGE, scheduler={'queue': {'capacity': 1}},
+            invocation={'entry_node': 'n1'},
+        ))
+        notifications = []
+        self.addCleanup(observer.subscribe(notifications.append))
+
+        totals = simulation.run(arrivals=3).metrics['total']
+        self.assertEqual((totals['arrivals'], totals['queued'], totals['waiting'], totals['pending']), (3, 1, 1, 2))
+        queued, = [event for event in notifications if event.type is NotificationType.REQUEST_QUEUED]
+        self.assertEqual((queued.sim_time_s, queued.region, queued.ring_id, queued.node_id), (1, 'default', 'edge', 'n1'))
+
+        self.advance_to(simulation._ctx.engine, 2.5)
+        snapshot = simulation.metrics_snapshot()
+        admitted, = [event for event in notifications if event.type is NotificationType.REQUEST_ACCEPTED
+                     and event.request_id == queued.request_id]
+        self.assertEqual((admitted.queue_wait_s, admitted.warm), (1.5, True))
+        totals = snapshot['total']
+        self.assertEqual((totals['arrivals'], totals['queued'], totals['waiting'], totals['accepted']), (3, 1, 0, 2))
+        self.assertEqual(totals['mean_queue_wait_s'], 1.5)
+        self.assertEqual(snapshot['nodes_by_ring']['edge']['n1']['invocations']['mean_queue_wait_s'], 1.5)
+
     def test_accepted_arrival_completes_and_releases_resources(self):
         """Riuso warm, scarti e prenotazioni confluiscono nelle metriche della replica."""
         function = Function('hello', 128, 1, BuiltinRuntime('python314'), profile=FunctionProfile(
@@ -507,8 +567,13 @@ class SimulationTest(unittest.TestCase):
         self.assertEqual((started['type'], started['sim_time_s']), (NotificationType.CONTAINER_STARTED, 1))
         self.assertEqual((stopped['type'], stopped['sim_time_s']), (NotificationType.CONTAINER_STOPPED, 4))
         self.assertEqual(started['run_id'], stopped['run_id'])
-        self.assertEqual(started['data'], stopped['data'])
+        for field in ('region', 'ring_id', 'node_id', 'container_id', 'function'):
+            self.assertEqual(started['data'][field], stopped['data'][field])
         self.assertEqual(stopped['data']['container_id'], first.container.id)
+        self.assertEqual((started['data']['previous'], started['data']['state']), ('creating', 'busy'))
+        self.assertEqual((stopped['data']['previous'], stopped['data']['state']), ('idle', 'destroyed'))
+        self.assertEqual(started['data']['resources']['busy_memory_mb'], 128)
+        self.assertEqual(stopped['data']['resources']['warm_memory_mb'], 0)
         unsubscribe()
         snapshot = simulation.metrics_snapshot()
         node_stats = snapshot['nodes_by_ring']['edge']['n1']
@@ -533,14 +598,23 @@ class SimulationTest(unittest.TestCase):
         path = Path(__file__).resolve().parents[1] / 'examples/scenarios/startup.toml'
         scenario = Scenario.load(path)
         first, second = Simulation(scenario), Simulation(scenario)
+        first.run(arrivals=0)
         second.run(arrivals=0)
-        first.run(arrivals=1)
+        notifications = []
+        self.addCleanup(observer.subscribe(notifications.append))
+        self.assertTrue(first._ctx.engine.step())
         first_nodes = first.metrics_snapshot()['nodes_by_ring']['edge-x86']
         second_nodes = second.metrics_snapshot()['nodes_by_ring']['edge-x86']
         self.assertEqual(set(first_nodes), {'edge-1', 'edge-2'})
         self.assertEqual(sum(node['used_cpus'] for node in first_nodes.values()), 1)
         self.assertEqual(sum(node['used_cpus'] for node in second_nodes.values()), 0)
         self.assertEqual(first.metrics_snapshot()['total']['accepted'], 1)
+        self.assertEqual(second.metrics_snapshot()['total']['arrivals'], 0)
+        self.assertTrue(notifications)
+        self.assertEqual({event.run_id for event in notifications}, {first.run_id})
+        self.assertTrue(second._ctx.engine.step())
+        self.assertEqual(second.metrics_snapshot()['total']['accepted'], 1)
+        self.assertEqual(first.metrics_snapshot()['total']['arrivals'], 1)
 
 
 class WelfordTest(unittest.TestCase):

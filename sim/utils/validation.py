@@ -1,6 +1,7 @@
 """Validatori numerici condivisi dal motore e dai generatori casuali."""
 
 import math
+from collections.abc import Sequence
 from numbers import Integral, Real
 
 
@@ -15,7 +16,7 @@ def finite_delay(value: float, name: str) -> float:
     return float(value)
 
 def positive_number(value: float, name: str) -> float:
-    if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) or value <= 0:
         raise ValueError(f'{name} deve essere finito e positivo')
     return float(value)
 
@@ -46,4 +47,12 @@ def positive_integer(value: int, name: str) -> int:
     value = nonnegative_integer(value, name)
     if value == 0:
         raise ValueError(f'{name} deve essere positivo')
+    return value
+
+
+def one_of[T](value: T, allowed: Sequence[T], name: str) -> T:
+    """Verifica che il valore appartenga alla sequenza dei valori ammessi."""
+    if value not in allowed:
+        choices = ', '.join(map(str, allowed))
+        raise ValueError(f'{name} deve essere uno tra {choices}')
     return value

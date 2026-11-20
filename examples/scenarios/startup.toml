@@ -43,9 +43,7 @@ cpus = 2.0
 
 [[infrastructure.rings.nodes]]
 name = "edge-1"
-area = "edge"
 
 [[infrastructure.rings.nodes]]
 name = "edge-2"
-area = "edge"
 machine_tag = "amd64/standard"

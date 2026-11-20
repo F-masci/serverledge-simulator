@@ -1,17 +1,26 @@
 """Stato logico di un container Docker, senza accesso al daemon."""
+from __future__ import annotations
+
 from collections.abc import Callable
 from enum import Enum
 import json
+from typing import TYPE_CHECKING
 from .function import Function
 from ..utils.validation import finite_time
+
+if TYPE_CHECKING:
+    from .node import Node
+    from .ring import ArchitectureRing
+    from .infrastructure import Infrastructure
+    from .region import Region
 
 
 class ContainerState(Enum):
     """Stato logico di un container Docker."""
-    CREATING = 'creating'
-    BUSY = 'busy'
-    IDLE = 'idle'
-    DESTROYED = 'destroyed'
+    CREATING = 'creating'    # Risorse prenotate, creazione del container ancora in corso.
+    BUSY = 'busy'            # Container pronto con almeno un'invocazione attiva.
+    IDLE = 'idle'            # Nessuna invocazione attiva, disponibile nel pool warm fino alla rimozione.
+    DESTROYED = 'destroyed'  # Container rimosso oppure creazione fallita.
 
 
 class DockerContainer:
@@ -19,8 +28,9 @@ class DockerContainer:
     Rappresenta lo stato di un container Docker
     """
 
-    def __init__(self, container_id: str, function: Function) -> None:
+    def __init__(self, container_id: str, function: Function, *, node: 'Node | None' = None) -> None:
         self._id = container_id
+        self._node = node
         self._function = function
         self._state = ContainerState.CREATING
         self._requests_count = 0
@@ -35,17 +45,67 @@ class DockerContainer:
         
         self.on_state_changed: Callable[[DockerContainer, ContainerState, ContainerState], None] | None = None
 
+    ### Identification ###
+
     @property
     def id(self) -> str:
         return self._id
 
+    ### Infrastructure ###
+
     @property
-    def function(self) -> Function:
-        return self._function
+    def node(self) -> Node:
+        assert self._node is not None, 'Container non associato a un nodo'
+        return self._node
+
+    @property
+    def ring(self) -> ArchitectureRing:
+        return self.node.ring
+
+    @property
+    def infrastructure(self) -> Infrastructure:
+        return self.ring.infrastructure
+
+    @property
+    def region(self) -> Region:
+        return self.infrastructure.region
+
+    ### Container State ###
 
     @property
     def state(self) -> ContainerState:
         return self._state
+
+    @property
+    def is_idle(self) -> bool:
+        return self._state is ContainerState.IDLE
+
+    @property
+    def is_busy(self) -> bool:
+        return self._state is ContainerState.BUSY
+
+    @property
+    def is_warm(self) -> bool:
+        return self._state in (ContainerState.IDLE, ContainerState.BUSY)
+
+    def is_expired(self, now: float) -> bool:
+        """Verifica se il container è scaduto."""
+        now = finite_time(now, 'now')
+        expiration_time = self.expiration_time
+
+        # Un container è considerato scaduto se è in stato IDLE
+        # e il tempo simulato corrente supera il tempo di scadenza.
+        if self._state is not ContainerState.IDLE:
+            return False
+        if expiration_time is None:
+            return False
+        return now > expiration_time
+
+    ### Execution State ###
+
+    @property
+    def function(self) -> Function:
+        return self._function
 
     @property
     def requests_count(self) -> int:
@@ -67,24 +127,16 @@ class DockerContainer:
     @property
     def cpu_quota_us(self) -> int:
         return int(self.cpu_period_us * self.function.cpu_demand)
-    
-    def is_expired(self, now: float) -> bool:
-        """Verifica se il container è scaduto."""
-        now = finite_time(now, 'now')
-        expiration_time = self.expiration_time
-    
-        # Un container è considerato scaduto se è in stato IDLE
-        # e il tempo simulato corrente supera il tempo di scadenza.
-        if self._state is not ContainerState.IDLE:
-            return False
-        if expiration_time is None:
-            return False
-        return now > expiration_time
+
+    #################################
+    ### Internal state management ###
+    #################################
+
+    ## State transitions ##
 
     def created(self, *, idle: bool, now: float, timeout: float) -> None:
         """Segna il container come creato, pronto per l'uso."""
-        if self._state is not ContainerState.CREATING:
-            raise ValueError('Container non in creazione')
+        self._ensure_status(ContainerState.CREATING, 'Creazione container')
         
         # Imposta il contatore e la scadenza prima di notificare la creazione.
         state = ContainerState.IDLE if idle else ContainerState.BUSY
@@ -100,10 +152,8 @@ class DockerContainer:
 
     def acquire(self) -> None:
         """Segna il container come occupato da una richiesta."""
-        if self._state not in (ContainerState.IDLE, ContainerState.BUSY):
-            raise ValueError('Container non riutilizzabile')
-        if self.requests_count >= self.function.max_concurrency:
-            raise ValueError('Concorrenza massima raggiunta')
+        self._ensure_statuses((ContainerState.IDLE, ContainerState.BUSY), 'Container non riutilizzabile')
+        self._ensure_concurrency()
         
         # Ogni acquisizione notifica on_busy, anche con altre richieste attive.
         self._requests_count += 1
@@ -112,8 +162,7 @@ class DockerContainer:
 
     def complete(self, now: float, timeout: float) -> None:
         """Segna il completamento di una richiesta e aggiorna lo stato del container."""
-        if self._state is not ContainerState.BUSY:
-            raise ValueError('Nessuna richiesta attiva')
+        self._ensure_status(ContainerState.BUSY, 'Nessuna richiesta attiva')
 
         # Il container torna idle alla conclusione dell'ultima richiesta attiva.
         self._requests_count -= 1
@@ -123,10 +172,12 @@ class DockerContainer:
 
     def destroy(self) -> None:
         """Segna il container come distrutto."""
-        if self._state not in (ContainerState.IDLE, ContainerState.CREATING):
-            raise ValueError('Distruzione ordinaria consentita solo per idle o creazione fallita')
+        self._ensure_statuses((ContainerState.IDLE, ContainerState.CREATING), 'Distruzione ordinaria consentita solo per idle o creazione fallita')
 
+        self._node = None
         self._handle_change_status(ContainerState.DESTROYED, self.on_destroyed)
+
+    ## Callback handling ##
 
     def _handle_change_status(
         self, state: ContainerState, callback: Callable[[DockerContainer], None] | None,
@@ -140,6 +191,27 @@ class DockerContainer:
             callback(self)
         if self.on_state_changed is not None and previous_state is not state:
             self.on_state_changed(self, previous_state, state)
+
+    ######################
+    ### Error handling ###
+    ######################
+
+    def _ensure_status(self, expected: ContainerState, message: str) -> None:
+        if self._state is not expected:
+            raise ValueError(f'{message}: stato attuale={self._state.value}, atteso={expected.value}')
+
+    def _ensure_statuses(self, expected: tuple[ContainerState, ...], message: str) -> None:
+        if self._state not in expected:
+            expected_values = ', '.join(state.value for state in expected)
+            raise ValueError(f'{message}: stato attuale={self._state.value}, attesi={expected_values}')
+
+    def _ensure_concurrency(self) -> None:
+        if self._requests_count >= self.function.max_concurrency:
+            raise ValueError('Concorrenza massima raggiunta')
+
+    #####################
+    ### Serialization ###
+    #####################
 
     def __str__(self) -> str:
         """Restituisce una descrizione leggibile del container."""
@@ -162,4 +234,4 @@ class DockerContainer:
         return json.dumps(self.to_dict(), ensure_ascii=False, allow_nan=False)
 
     def __repr__(self) -> str:
-        return f'DockerContainer({self.id!r}, {self._state.value}, requests={self.requests_count})'
+        return f'<DockerContainer id={self.id} function={self.function.name} state={self.state.value}>'

@@ -4,7 +4,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
-from sim.model.function import Function, FunctionProfile, Runtime
+from sim.model.function import Function, FunctionProfile
+from sim.model.runtime import Runtime
 from sim.model.offloading import SchedulingPolicy
 from sim.utils.validation import finite_time, integer, nonempty_string, positive_integer, positive_number, \
     nonnegative_number
@@ -17,9 +18,6 @@ class _SchedulerConfig:
     queue_capacity: int
     policy: SchedulingPolicy
     fallback_local: bool
-    offloading_cache_validity: int
-    nearby_interval: int
-    monitoring_interval: int
 
     @classmethod
     def parse(cls, scheduler: object) -> '_SchedulerConfig':
@@ -29,8 +27,7 @@ class _SchedulerConfig:
         if scheduler is None:
             scheduler = {}
 
-        allowed = {'queue', 'policy', 'fallback_local', 'offloading_cache_validity',
-                   'nearby_interval', 'monitoring_interval'}
+        allowed = {'queue', 'policy', 'fallback_local'}
         if not isinstance(scheduler, Mapping) or scheduler.keys() - allowed:
             raise ValueError(f'Campi scheduler ammessi: {", ".join(sorted(allowed))}')
         queue = scheduler.get('queue', {})
@@ -44,13 +41,6 @@ class _SchedulerConfig:
             queue_capacity=capacity,
             policy=SchedulingPolicy(nonempty_string(scheduler.get('policy', 'default'), 'scheduler.policy')),
             fallback_local=_boolean(scheduler.get('fallback_local', False), 'scheduler.fallback_local'),
-            offloading_cache_validity=integer(
-                scheduler.get('offloading_cache_validity', 60), 'scheduler.offloading_cache_validity',
-            ),
-            nearby_interval=positive_integer(scheduler.get('nearby_interval', 20), 'scheduler.nearby_interval'),
-            monitoring_interval=positive_integer(
-                scheduler.get('monitoring_interval', 30), 'scheduler.monitoring_interval',
-            ),
         )
 
 
@@ -74,7 +64,6 @@ class _InvocationConfig:
     """Ingresso e autorizzazione all'offloading per gli arrivi generati."""
 
     entry_node: str | None = None
-    entry_area: str | None = None
     can_offload: bool = False
     entry_region: str | None = None
 
@@ -83,13 +72,12 @@ class _InvocationConfig:
         if invocation is None:
             return cls()
         if not isinstance(invocation, Mapping) or invocation.keys() - {
-            'entry_node', 'entry_area', 'entry_region', 'can_offload',
+            'entry_node', 'entry_region', 'can_offload',
         }:
-            raise ValueError('invocation accetta solo entry_node, entry_area, entry_region e can_offload')
+            raise ValueError('invocation accetta solo entry_node, entry_region e can_offload')
         node = nonempty_string(invocation['entry_node'], 'invocation.entry_node') if 'entry_node' in invocation else None
-        area = nonempty_string(invocation['entry_area'], 'invocation.entry_area') if 'entry_area' in invocation else None
         region = nonempty_string(invocation['entry_region'], 'invocation.entry_region') if 'entry_region' in invocation else None
-        return cls(node, area, _boolean(invocation.get('can_offload', False), 'invocation.can_offload'), region)
+        return cls(node, _boolean(invocation.get('can_offload', False), 'invocation.can_offload'), region)
 
 
 @dataclass(frozen=True)
@@ -139,10 +127,8 @@ class _NodeConfig:
     """Identità del nodo; architettura e capacità sono definite dal ring."""
 
     name: str
-    area: str
     machine_tag: str | None
     policy: SchedulingPolicy | None
-    remote_area: str | None
     fallback_local: bool | None
     nearest_neighbors: tuple[str, ...] | None
     remote_region: str | None
@@ -150,24 +136,20 @@ class _NodeConfig:
     @classmethod
     def parse(cls, data: object) -> '_NodeConfig':
         """Parse della configurazione di un nodo."""
-        required = {'name', 'area'}
-        optional = {'machine_tag', 'policy', 'remote_area', 'remote_region', 'fallback_local', 'nearest_neighbors'}
+        required = {'name'}
+        optional = {'machine_tag', 'policy', 'remote_region', 'fallback_local', 'nearest_neighbors'}
         if not isinstance(data, Mapping) or required - data.keys() or data.keys() - required - optional:
-            raise ValueError(f'Ogni nodo richiede name e area. Campi opzionali: {", ".join(sorted(optional))}')
+            raise ValueError(f'Ogni nodo richiede name. Campi opzionali: {", ".join(sorted(optional))}')
         name = nonempty_string(data['name'], 'node.name')
-        area = nonempty_string(data['area'], 'node.area')
         tag = nonempty_string(data['machine_tag'], 'node.machine_tag') if 'machine_tag' in data else None
 
         policy = SchedulingPolicy(nonempty_string(data['policy'], 'node.policy')) if 'policy' in data else None
-        remote = nonempty_string(data['remote_area'], 'node.remote_area') if 'remote_area' in data else None
         region = nonempty_string(data['remote_region'], 'node.remote_region') if 'remote_region' in data else None
-        if remote is not None and region is not None:
-            raise ValueError('Usare un solo campo tra node.remote_area e node.remote_region')
         fallback = _boolean(data['fallback_local'], 'node.fallback_local') if 'fallback_local' in data else None
         neighbors = _names(data['nearest_neighbors'], 'node.nearest_neighbors') if 'nearest_neighbors' in data else None
         if neighbors is not None and (len(neighbors) > 2 or name in neighbors):
-            raise ValueError('node.nearest_neighbors ammette fino a due altri nodi della stessa area')
-        return cls(name, area, tag, policy, remote, fallback, neighbors, region)
+            raise ValueError('node.nearest_neighbors ammette fino a due altri nodi della stessa regione')
+        return cls(name, tag, policy, fallback, neighbors, region)
 
 
 @dataclass(frozen=True)
@@ -220,7 +202,6 @@ class _InfrastructureConfig:
     """Topologia dichiarativa dalla quale ogni replica costruisce i suoi nodi."""
 
     rings: tuple[_RingConfig, ...]
-    load_balancer_areas: tuple[str, ...] = ()
 
     @classmethod
     def parse(cls, infrastructure: object) -> '_InfrastructureConfig':
@@ -231,9 +212,8 @@ class _InfrastructureConfig:
             return cls(())
 
         # Controlla che la sezione contenga la lista dei ring.
-        if (not isinstance(infrastructure, Mapping) or 'rings' not in infrastructure
-                or infrastructure.keys() - {'rings', 'load_balancer_areas'}):
-            raise ValueError('infrastructure richiede rings e accetta load_balancer_areas')
+        if not isinstance(infrastructure, Mapping) or infrastructure.keys() != {'rings'}:
+            raise ValueError('infrastructure richiede rings')
         definitions = infrastructure['rings']
         if not isinstance(definitions, list):
             raise ValueError('infrastructure.rings deve essere una lista')
@@ -246,8 +226,7 @@ class _InfrastructureConfig:
                 raise ValueError(f'Ring già definito: {ring.id}')
             rings[ring.id] = ring
         # Restituisce i ring validati nell'ordine dichiarato.
-        areas = _names(infrastructure.get('load_balancer_areas', []), 'infrastructure.load_balancer_areas')
-        return cls(tuple(rings.values()), areas)
+        return cls(tuple(rings.values()))
 
 
 @dataclass(frozen=True)
@@ -256,12 +235,14 @@ class _RegionConfig:
     service_time_s: float = 0.0
     offload_latency_s: float = 0.0
     offload_latency_by_source_s: Mapping[str, float] = field(default_factory=lambda: MappingProxyType({}))
+    has_load_balancer: bool = True
 
     @classmethod
     def parse(cls, name: str, data: object) -> '_RegionConfig':
         prefix = f'regions.{name}'
         if not isinstance(data, Mapping) or data.keys() - {
             'mode', 'infrastructure', 'service_time_s', 'offload_latency_s', 'offload_latency_by_source_s',
+            'has_load_balancer',
         }:
             raise ValueError(f'Configurazione non valida per {prefix}')
         latency = nonnegative_number(data.get('offload_latency_s', 0), f'{prefix}.offload_latency_s')
@@ -279,10 +260,13 @@ class _RegionConfig:
             if 'service_time_s' in data:
                 raise ValueError(f'{prefix}.service_time_s richiede mode = "always_succeeds"')
             return cls(_InfrastructureConfig.parse(data.get('infrastructure')), offload_latency_s=latency,
-                       offload_latency_by_source_s=latencies)
+                       offload_latency_by_source_s=latencies,
+                       has_load_balancer=_boolean(data.get('has_load_balancer', True), f'{prefix}.has_load_balancer'))
         if mode == 'always_succeeds':
             if 'infrastructure' in data:
                 raise ValueError(f'{prefix}.infrastructure richiede mode = "simulated"')
+            if 'has_load_balancer' in data:
+                raise ValueError(f'{prefix}.has_load_balancer richiede mode = "simulated"')
             duration = nonnegative_number(data.get('service_time_s', 0), f'{prefix}.service_time_s')
             return cls(None, duration, latency, latencies)
         raise ValueError(f'{prefix}.mode deve essere simulated o always_succeeds')

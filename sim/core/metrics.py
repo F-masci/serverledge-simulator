@@ -4,11 +4,14 @@ from collections import Counter
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 
-from sim.model.container import ContainerState, DockerContainer
+from sim.model.container import ContainerState
 from sim.model.infrastructure import Infrastructure
-from sim.model.node import Node
 from sim.model.region import Region
-from sim.model.request import Request, RequestStatus
+from sim.observer.notifications import (
+    ContainerStateChanged, NodeRegistered, Notification, RequestAccepted, RequestArrived, RequestCompleted,
+    RequestDelivered, RequestForwarded, RequestQueued, RequestRejected,
+)
+from sim.observer.notifications.node import ResourceSnapshot
 from sim.utils.welford import TimedWelford, Welford
 
 
@@ -31,20 +34,17 @@ class _InvocationMetrics:
     def arrivals(self) -> int:
         return self.in_transit + self.waiting + self.accepted + self.rejections.total()
 
-    def record_submission(self, request: Request) -> None:
-        if request.status is RequestStatus.QUEUED:
-            self.waiting += 1
-            self.queued += 1
-        elif request.status is RequestStatus.ACCEPTED:
-            self.accepted += 1
-            if request.warm is None:
-                self.accepted_without_container += 1
-            elif request.warm:
-                self.warm_starts += 1
-            else:
-                self.cold_starts += 1
+    def record_acceptance(self, warm: bool | None, queue_wait_s: float | None) -> None:
+        if queue_wait_s is not None:
+            self.waiting -= 1
+            self.queue_wait.add(queue_wait_s)
+        self.accepted += 1
+        if warm is None:
+            self.accepted_without_container += 1
+        elif warm:
+            self.warm_starts += 1
         else:
-            self.rejections[request.rejection_reason or 'unknown'] += 1
+            self.cold_starts += 1
 
     def record_completion(self, response_time: float, service_time: float) -> None:
         self.completed += 1
@@ -132,31 +132,32 @@ class _ContainerMetrics:
 
 
 class _NodeMetrics:
-    def __init__(self, node: Node, now: float) -> None:
+    def __init__(self, resources: ResourceSnapshot, now: float) -> None:
         self.invocations = _InvocationMetrics()
         self.by_function: dict[str, _InvocationMetrics] = {}
+        self.current = resources
         self.resources = {
-            name: TimedWelford(now, value) for name, value in self._reservations(node).items()
+            name: TimedWelford(now, value) for name, value in self._reservations(resources).items()
         }
 
     @staticmethod
-    def _reservations(node: Node) -> dict[str, float]:
-        resources = node.resources
+    def _reservations(resources: ResourceSnapshot) -> dict[str, float]:
         return {
             'used_cpus': resources.used_cpus,
-            'busy_memory_mb': resources.busy_pool_used_mem,
-            'warm_memory_mb': resources.warm_pool_used_mem,
+            'busy_memory_mb': resources.busy_memory_mb,
+            'warm_memory_mb': resources.warm_memory_mb,
         }
 
-    def observe(self, node: Node, now: float) -> None:
-        for name, value in self._reservations(node).items():
+    def observe(self, resources: ResourceSnapshot, now: float) -> None:
+        self.current = resources
+        for name, value in self._reservations(resources).items():
             self.resources[name].observe(now, value)
 
-    def snapshot(self, node: Node, now: float) -> dict:
+    def snapshot(self, now: float) -> dict:
         return {
-            **self._reservations(node),
-            'total_cpus': node.resources.total_cpus,
-            'total_memory_mb': node.resources.total_memory,
+            **self._reservations(self.current),
+            'total_cpus': self.current.total_cpus,
+            'total_memory_mb': self.current.total_memory_mb,
             'invocations': self.invocations.snapshot(),
             'by_function': {name: stats.snapshot() for name, stats in self.by_function.items()},
             'time_weighted_resources': {
@@ -165,8 +166,11 @@ class _NodeMetrics:
         }
 
 
+type _NodeKey = tuple[str, str, str]  # Regione, ring e nome del nodo.
+
+
 class SimulationMetrics:
-    """Raccoglie statistiche online e contatori globali, per funzione e per nodo."""
+    """Aggrega le notifiche della replica in statistiche online."""
 
     def __init__(self) -> None:
         self._total = _InvocationMetrics()
@@ -174,130 +178,109 @@ class SimulationMetrics:
         self._by_region: dict[str, _InvocationMetrics] = {}
         self._external_arrivals: Counter[str] = Counter()
         self._offloads: Counter[tuple[str, str]] = Counter()
-        self._by_node: dict[Node, _NodeMetrics] = {}
-        self._containers: dict[tuple[Node | None, str | None], _ContainerMetrics] = {}
-        self._container_functions_by_node: dict[Node, set[str]] = {}
+        self._by_node: dict[_NodeKey, _NodeMetrics] = {}
+        self._containers: dict[tuple[_NodeKey | None, str | None], _ContainerMetrics] = {}
+        self._container_functions_by_node: dict[_NodeKey, set[str]] = {}
         self._container_functions: set[str] = set()
-        self._creation_started_at: dict[DockerContainer, float] = {}
-
-    def __str__(self) -> str:
-        """Riepilogo globale leggibile delle invocazioni e dei container."""
-        totals = self._total.snapshot()
-        containers = self._containers.get((None, None))
-        if containers is None:
-            containers = _ContainerMetrics()
-        counts = containers.counts
-        lines = [
-            f"Arrivi elaborati: {totals['arrivals']}",
-            f"Accettate: {totals['accepted']} | Scartate: {totals['rejected']} | "
-            f"Completate: {totals['completed']} | Pendenti: {totals['pending']} "
-            f"(in coda: {totals['waiting']})",
-            f"Cold start: {totals['cold_starts']} | Warm start: {totals['warm_starts']}",
-            f"Container in creazione: {counts[ContainerState.CREATING]} | "
-            f"Occupati: {counts[ContainerState.BUSY]} | Inattivi: {counts[ContainerState.IDLE]}",
-            f"Container creati: {containers.created} | Rimossi: {containers.destroyed} | "
-            f"Creazioni fallite: {containers.creation_failed}",
-        ]
-        if totals['rejections_by_reason']:
-            reasons = ', '.join(f'{reason}={count}' for reason, count in sorted(self._total.rejections.items()))
-            lines.append(f'Motivi di scarto: {reasons}')
-        for label, mean in (
-            ('Tempo medio di risposta', totals['mean_response_time_s']),
-            ('Tempo medio di attesa in coda', totals['mean_queue_wait_s']),
-        ):
-            if mean is not None:
-                lines.append(f'{label}: {mean:.6g} s')
-        return '\n'.join(lines)
+        self._creation_started_at: dict[tuple[_NodeKey, str], float] = {}
 
     @property
     def arrivals(self) -> int:
-        return self._total.arrivals
+        return self._external_arrivals.total()
 
-    def register_node(self, node: Node, now: float) -> None:
-        """Fissa lo stato iniziale delle prenotazioni del nodo."""
-        if node not in self._by_node:
-            self._by_node[node] = _NodeMetrics(node, now)
+    def on_notification(self, notification: Notification) -> None:
+        """Aggiorna le metriche prima che la notifica raggiunga i subscriber esterni."""
+        match notification:
+            case NodeRegistered():
+                self._register_node(notification)
+            case ContainerStateChanged():
+                self._record_container_state(notification)
+            case RequestArrived(region=region) if region is not None:
+                self._external_arrivals[region] += 1
+            case RequestForwarded(source_region=source, region=destination) if destination is not None:
+                self._offloads[source, destination] += 1
+                for stats in self._invocations_for(notification.function, destination):
+                    stats.in_transit += 1
+            case RequestDelivered():
+                for stats in self._invocations_for(notification.function, notification.region):
+                    stats.in_transit -= 1
+            case RequestQueued() | RequestAccepted() | RequestRejected() | RequestCompleted():
+                self._record_invocation(notification)
 
-            for container in node.iter_containers():
-                for stats in self._container_scopes(node, container.function.name):
-                    stats.observe(now, container.state, 1)
+    def _record_invocation(
+        self, event: RequestQueued | RequestAccepted | RequestRejected | RequestCompleted,
+    ) -> None:
+        for stats in self._invocations_for(event.function, event.region, event.ring_id, event.node_id):
+            match event:
+                case RequestQueued():
+                    stats.waiting += 1
+                    stats.queued += 1
+                case RequestAccepted():
+                    stats.record_acceptance(event.warm, event.queue_wait_s)
+                case RequestRejected():
+                    stats.rejections[event.reason] += 1
+                case RequestCompleted():
+                    if event.service_time_s is None:
+                        raise ValueError('Il completamento richiede una durata di servizio')
+                    stats.record_completion(event.response_time_s, event.service_time_s)
 
-    def _container_scopes(self, node: Node, name: str) -> Iterator[_ContainerMetrics]:
+    def _register_node(self, event: NodeRegistered) -> None:
+        key = (event.region, event.ring_id, event.node_id)
+        if key in self._by_node:
+            return
+        self._by_node[key] = _NodeMetrics(event.resources, event.sim_time_s)
+        for container in event.containers:
+            for stats in self._container_scopes(key, container.function):
+                stats.observe(event.sim_time_s, container.state, 1)
+
+    def _container_scopes(self, key: _NodeKey, name: str) -> Iterator[_ContainerMetrics]:
         self._container_functions.add(name)
-        self._container_functions_by_node.setdefault(node, set()).add(name)
-        for scope in ((None, None), (None, name), (node, None), (node, name)):
+        self._container_functions_by_node.setdefault(key, set()).add(name)
+        for scope in ((None, None), (None, name), (key, None), (key, name)):
             if scope not in self._containers:
                 self._containers[scope] = _ContainerMetrics()
             yield self._containers[scope]
 
-    def record_container_state(
-        self, node: Node, container: DockerContainer, previous: ContainerState | None, now: float,
-    ) -> None:
+    def _record_container_state(self, event: ContainerStateChanged) -> None:
+        if event.region is None or event.state is None or event.resources is None:
+            raise ValueError('La transizione richiede regione, stato e prenotazioni del nodo')
+        key = (event.region, event.ring_id, event.node_id)
+        container = (key, event.container_id)
+        now = event.sim_time_s
         creation_time = None
-        if previous is None:
+        if event.previous is None:
             self._creation_started_at[container] = now
-        elif previous is ContainerState.CREATING:
+        elif event.previous is ContainerState.CREATING:
             started_at = self._creation_started_at.pop(container, None)
             if started_at is not None:
                 creation_time = now - started_at
-        for stats in self._container_scopes(node, container.function.name):
-            stats.record_transition(now, previous, container.state, creation_time)
-        self.observe_resources(node, now)
+        for stats in self._container_scopes(key, event.function):
+            stats.record_transition(now, event.previous, event.state, creation_time)
+        self._by_node[key].observe(event.resources, now)
 
-    def _container_snapshot(self, now: float, node: Node | None = None, name: str | None = None) -> dict:
-        stats = self._containers.get((node, name))
+    def _container_snapshot(self, now: float, key: _NodeKey | None = None, name: str | None = None) -> dict:
+        stats = self._containers.get((key, name))
         return (stats if stats is not None else _ContainerMetrics()).snapshot(now)
 
-    def observe_resources(self, node: Node, now: float) -> None:
-        self.register_node(node, now)
-        self._by_node[node].observe(node, now)
-
-    def _invocations_for(self, request: Request, now: float) -> Iterator[_InvocationMetrics]:
-        name = request.function.name
+    def _invocations_for(
+        self, name: str, region: str | None, ring_id: str | None = None, node_id: str | None = None,
+    ) -> Iterator[_InvocationMetrics]:
         if name not in self._by_function:
             self._by_function[name] = _InvocationMetrics()
         yield self._total
         yield self._by_function[name]
-        if request.region is not None:
-            if request.region not in self._by_region:
-                self._by_region[request.region] = _InvocationMetrics()
-            yield self._by_region[request.region]
-        node = request.node
-        if node is not None:
-            self.observe_resources(node, now)
-            stats = self._by_node[node]
+        if region is not None:
+            if region not in self._by_region:
+                self._by_region[region] = _InvocationMetrics()
+            yield self._by_region[region]
+        if region is not None and ring_id is not None and node_id is not None:
+            stats = self._by_node[region, ring_id, node_id]
             if name not in stats.by_function:
                 stats.by_function[name] = _InvocationMetrics()
             yield stats.invocations
             yield stats.by_function[name]
 
-    def record_submission(self, request: Request, now: float) -> None:
-        for stats in self._invocations_for(request, now):
-            stats.record_submission(request)
-
-    def record_transfer(self, request: Request, now: float, delta: int) -> None:
-        for stats in self._invocations_for(request, now):
-            stats.in_transit += delta
-
-    def record_offload(self, source: str, destination: str) -> None:
-        self._offloads[source, destination] += 1
-
-    def record_external_arrival(self, region: str) -> None:
-        self._external_arrivals[region] += 1
-
-    def record_dequeue(self, request: Request, now: float) -> None:
-        for stats in self._invocations_for(request, now):
-            stats.waiting -= 1
-            stats.queue_wait.add(now - request.region_arrival_time)
-            stats.record_submission(request)
-
-    def record_completion(self, request: Request, now: float) -> None:
-        service_time = request.service_duration
-        assert service_time is not None  # Le richieste simulate hanno una durata campionata.
-        for stats in self._invocations_for(request, now):
-            stats.record_completion(now - request.arrival_time, service_time)
-
-    def _nodes_snapshot(self, now: float, infrastructure: Infrastructure | None) -> dict:
+    def _nodes_snapshot(self, now: float, region: str, infrastructure: Infrastructure | None) -> dict:
         """Restituisce e separa le metriche dei nodi per ring e nome."""
         nodes_by_ring = {}
         if infrastructure is None:
@@ -305,14 +288,15 @@ class SimulationMetrics:
         for ring_id, ring in infrastructure.rings.items():
             nodes = {}
             for node in ring:
-                stats = self._by_node.get(node)
+                key = (region, ring_id, node.id.key)
+                stats = self._by_node.get(key)
                 if stats is None:
-                    stats = _NodeMetrics(node, now)
-                node_snapshot = stats.snapshot(node, now)
-                node_snapshot['containers'] = self._container_snapshot(now, node)
-                for name in sorted(stats.by_function.keys() | self._container_functions_by_node.get(node, set())):
+                    stats = _NodeMetrics(ResourceSnapshot.from_node(node), now)
+                node_snapshot = stats.snapshot(now)
+                node_snapshot['containers'] = self._container_snapshot(now, key)
+                for name in sorted(stats.by_function.keys() | self._container_functions_by_node.get(key, set())):
                     function_stats = node_snapshot['by_function'].setdefault(name, _InvocationMetrics().snapshot())
-                    function_stats['containers'] = self._container_snapshot(now, node, name)
+                    function_stats['containers'] = self._container_snapshot(now, key, name)
                 nodes[node.id.key] = node_snapshot
             nodes_by_ring[ring_id] = nodes
         return nodes_by_ring
@@ -325,13 +309,13 @@ class SimulationMetrics:
                 'invocations': (
                     self._by_region[name].snapshot() if name in self._by_region else _InvocationMetrics().snapshot()
                 ),
-                'nodes_by_ring': self._nodes_snapshot(now, region.infrastructure),
+                'nodes_by_ring': self._nodes_snapshot(now, name, region.infrastructure),
             }
             for name, region in regions.items()
         }
         return {
             'time_s': now,
-            'total': {**self._total.snapshot(), 'containers': self._container_snapshot(now)},
+            'total': {**self._total.snapshot(), 'arrivals': self.arrivals, 'containers': self._container_snapshot(now)},
             'by_function': {
                 name: {
                     **self._by_function.get(name, _InvocationMetrics()).snapshot(),

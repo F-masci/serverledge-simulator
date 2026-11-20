@@ -9,7 +9,8 @@ import tomllib
 from types import MappingProxyType
 from typing import TextIO
 
-from sim.model.function import BuiltinRuntime, CustomRuntime, Function, FunctionProfile, Runtime
+from sim.model.function import Function, FunctionProfile
+from sim.model.runtime import BuiltinRuntime, CustomRuntime, Runtime
 from sim.model.load_balancer import LoadBalancerMode
 from sim.random.streams import RandomStreams
 from sim.utils.validation import nonempty_string, nonnegative_integer
@@ -93,7 +94,7 @@ class Scenario:
         entry = invocation.entry_region or primary
         if entry not in configured:
             raise ValueError(f'invocation.entry_region sconosciuta: {entry}')
-        if configured[entry].infrastructure is None and (invocation.entry_node or invocation.entry_area):
+        if configured[entry].infrastructure is None and invocation.entry_node:
             raise ValueError(f'La regione {entry} accetta invocazioni a livello di regione')
 
         for name, region in configured.items():

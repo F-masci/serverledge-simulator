@@ -30,7 +30,7 @@ def function(name='f', concurrency=2, memory=128, runtime=None):
 class ModelsTest(unittest.TestCase):
     def setUp(self):
         # Nodo nuovo per ogni test: 512 unità di RAM e 2 CPU prenotabili.
-        self.node = Node('n', 512, 2, 'edge', 'amd64')
+        self.node = Node('n', 512, 2, 'amd64')
 
     def test_runtime_limits(self):
         """Verifica il limite effettivo alla registrazione della funzione.
@@ -175,7 +175,7 @@ class ModelsTest(unittest.TestCase):
         """
         c = self.node.acquire(function())
         self.node.creation_succeeded(c, 0)
-        other = Node('other', 512, 2, 'edge', 'amd64')
+        other = Node('other', 512, 2, 'amd64')
         with self.assertRaises(ValueError):
             other.complete(c, 1)
         self.assertEqual(c.state, ContainerState.BUSY)

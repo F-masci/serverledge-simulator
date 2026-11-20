@@ -15,8 +15,13 @@ class NotificationType(StrEnum):
 
     CONTAINER_STARTED = 'container.started'
     CONTAINER_STOPPED = 'container.stopped'
+    CONTAINER_STATE_CHANGED = 'container.state_changed'
+    NODE_REGISTERED = 'node.registered'
     SIMULATION_ERROR = 'simulation.error'
     REQUEST_ARRIVED = 'request.arrived'
+    REQUEST_QUEUED = 'request.queued'
+    REQUEST_FORWARDED = 'request.forwarded'
+    REQUEST_DELIVERED = 'request.delivered'
     REQUEST_ACCEPTED = 'request.accepted'
     REQUEST_REJECTED = 'request.rejected'
     REQUEST_COMPLETED = 'request.completed'

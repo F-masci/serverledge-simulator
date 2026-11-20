@@ -40,7 +40,5 @@ infrastructure:
     cpus: 2.0
     nodes:
     - name: edge-1
-      area: edge
     - name: edge-2
-      area: edge
       machine_tag: amd64/standard

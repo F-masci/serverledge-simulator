@@ -32,7 +32,7 @@ class RoutingTest(unittest.TestCase):
         ):
             infra.create_ring(ring_id, arch=arch, memory=512, cpus=2)
             if tag is not None:
-                infra.create_node(ring_id, ring_id, 'edge', tag)
+                infra.create_node(ring_id, ring_id, tag)
         constrained = replace(function(archs=('amd64',)), tag_pattern='GPU, nvidia')
 
         def draws(seed):
@@ -64,7 +64,7 @@ class RoutingTest(unittest.TestCase):
         for ring_id in ('gpu-first', 'gpu-second', 'gpu-third', 'plain'):
             infra.create_ring(ring_id, arch='amd64', memory=128, cpus=1)
             nodes[ring_id] = infra.create_node(
-                ring_id, ring_id, 'edge', f'x86/{ring_id}', queue_capacity=1,
+                ring_id, ring_id, f'x86/{ring_id}', queue_capacity=1,
             )
 
         fun = replace(function(), tag_pattern='x86/gpu-*')
@@ -92,8 +92,8 @@ class RoutingTest(unittest.TestCase):
     def test_ring_with_mixed_node_tags_only_admits_compatible_nodes(self):
         infra = Infrastructure()
         ring = infra.create_ring('r', arch='amd64', memory=512, cpus=2)
-        regular = infra.create_node('r', 'one', 'edge')
-        gpu = infra.create_node('r', 'three', 'edge', 'x86/gpu')
+        regular = infra.create_node('r', 'one')
+        gpu = infra.create_node('r', 'three', 'x86/gpu')
         self.assertIs(ring.select_node(function()), regular)
 
         constrained = replace(function(), tag_pattern='gpu')
@@ -118,7 +118,7 @@ class RoutingTest(unittest.TestCase):
         self.assertIsNone(infra.submit(Request(function())))
         infra.create_ring('empty', arch='amd64', memory=512, cpus=2)
         infra.create_ring('arm', arch='arm64', memory=512, cpus=2)
-        arm = infra.create_node('arm', 'a', 'edge')
+        arm = infra.create_node('arm', 'a')
         self.assertIsNone(infra.submit(Request(function(archs=('amd64',)))))
         self.assertEqual(arm.resources.used_cpus, 0)
         request = Request(function())
@@ -128,8 +128,8 @@ class RoutingTest(unittest.TestCase):
     def test_hash_lookup_matches_reference_at_boundary_and_wraparound(self):
         infra = Infrastructure()
         ring = infra.create_ring('r', arch='amd64', memory=512, cpus=2, replicas=2)
-        first = infra.create_node('r', 'n1', 'edge')
-        second = infra.create_node('r', 'n2', 'edge')
+        first = infra.create_node('r', 'n1')
+        second = infra.create_node('r', 'n2')
 
         # Go HashRing.Add/Get: n2#1 è l'ultimo punto di n2, seguito da n1.
         # L'hash di foobar supera tutti i punti e riparte dal primo (n2).
@@ -140,7 +140,7 @@ class RoutingTest(unittest.TestCase):
     def test_same_function_uses_reference_order_until_all_nodes_are_saturated(self):
         infra = Infrastructure()
         infra.create_ring('r', arch='amd64', memory=512, cpus=2)
-        nodes = {name: infra.create_node('r', name, 'edge') for name in ('one', 'two', 'three')}
+        nodes = {name: infra.create_node('r', name) for name in ('one', 'two', 'three')}
 
         # Ordine ottenuto con FNV-1a e 128 repliche in Go, saturando un nodo alla volta.
         for name in ('one', 'three', 'two'):
@@ -161,8 +161,8 @@ class RoutingTest(unittest.TestCase):
     def test_removing_primary_updates_routing_before_notification(self):
         infra = Infrastructure()
         ring = infra.create_ring('r', arch='amd64', memory=512, cpus=2)
-        primary = infra.create_node('r', 'one', 'edge')
-        secondary = infra.create_node('r', 'three', 'edge')
+        primary = infra.create_node('r', 'one')
+        secondary = infra.create_node('r', 'three')
         self.assertIs(ring.select_node(function()), primary)
         observed = []
 
@@ -184,7 +184,7 @@ class RoutingTest(unittest.TestCase):
         self.assertIsNone(infra.submit(request))
         self.assertEqual(request.rejection_reason, 'no_destination')
 
-        replacement = infra.create_node('r', 'one', 'edge')
+        replacement = infra.create_node('r', 'one')
         self.assertIsNot(replacement, primary)
         self.assertIs(infra.submit(Request(function())), replacement)
 

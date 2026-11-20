@@ -17,7 +17,7 @@ from sim.model.container import ContainerState
 class RequestAdmissionTest(unittest.TestCase):
     def test_cold_busy_reuse_limit_and_idle_reactivation(self):
         """Il submit usa lo stesso ciclo di acquisizione e non duplica le risorse sul busy."""
-        node = Node('n', 256, 1, 'edge', 'amd64')
+        node = Node('n', 256, 1, 'amd64')
         fun = Function('f', 128, 1, BuiltinRuntime('python314'), max_concurrency=2)
         first = Request(fun)
         self.assertTrue(node.submit(first))
@@ -45,7 +45,7 @@ class RequestAdmissionTest(unittest.TestCase):
 
     def test_fifo_stops_at_blocked_head_and_new_arrivals_try_immediately(self):
         """Segue OnCompletion e OnArrival della policy locale default in Go."""
-        node = Node('n', 256, 1, 'edge', 'amd64', queue_capacity=2)
+        node = Node('n', 256, 1, 'amd64', queue_capacity=2)
         fun = Function('f', 128, 1, BuiltinRuntime('python314'))
         active, follower = Request(fun), Request(fun)
         oversized = Request(Function('large', 128, 2, BuiltinRuntime('python314')))
@@ -64,7 +64,7 @@ class RequestAdmissionTest(unittest.TestCase):
 
     def test_callbacks_observe_request_after_each_transition(self):
         """La FIFO ammette la richiesta e i callback vedono lo stato aggiornato."""
-        node = Node('n', 128, 1, 'edge', 'amd64', queue_capacity=1)
+        node = Node('n', 128, 1, 'amd64', queue_capacity=1)
         fun = Function('f', 128, 1, BuiltinRuntime('python314'))
         active, waiting, rejected = (Request(fun) for _ in range(3))
         transitions = []

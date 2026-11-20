@@ -23,22 +23,22 @@ class InfrastructureTest(unittest.TestCase):
         infra.on_ring_created = ring_created
         infra.on_node_created = node_created
         ring = infra.create_ring('x86-small', arch='amd64', memory=512, cpus=2)
-        node = infra.create_node('x86-small', 'n1', 'edge', 'cpu')
+        node = infra.create_node('x86-small', 'n1', 'cpu')
 
         self.assertIs(infra.create_ring('x86-small', cpus=4), ring)
         self.assertEqual(ring.cpus, 2)
         self.assertEqual(created_rings, [ring])
         self.assertEqual(created_nodes, [node])
-        self.assertEqual((node.id.arch, node.id.area, node.id.machine_tag), ('amd64', 'edge', 'cpu'))
+        self.assertEqual((node.id.arch, node.id.machine_tag), ('amd64', 'cpu'))
 
     def test_ring_capacities_are_shared_but_reservations_are_independent(self):
         """Stessa architettura può avere ring di taglie diverse; ogni ring resta omogeneo."""
         infra = Infrastructure()
         small = infra.create_ring('small', arch='amd64', memory=512, cpus=2)
         large = infra.create_ring('large', arch='amd64', memory=1024, cpus=4)
-        a = infra.create_node('small', 'a', 'edge')
-        b = infra.create_node('small', 'b', 'edge')
-        c = infra.create_node('large', 'c', 'edge')
+        a = infra.create_node('small', 'a')
+        b = infra.create_node('small', 'b')
+        c = infra.create_node('large', 'c')
         for node in (a, b):
             self.assertEqual((node.resources.total_memory, node.resources.total_cpus), (512, 2))
         self.assertEqual((c.resources.total_memory, c.resources.total_cpus), (1024, 4))
@@ -52,11 +52,11 @@ class InfrastructureTest(unittest.TestCase):
         """Creazioni non valide lasciano intatti inventario e capacità."""
         infra = Infrastructure()
         ring = infra.create_ring('small', arch='amd64', memory=512, cpus=2)
-        node = infra.create_node('small', 'n1', 'edge')
+        node = infra.create_node('small', 'n1')
         with self.assertRaises(ValueError):
-            infra.create_node('small', 'n1', 'edge')
+            infra.create_node('small', 'n1')
         with self.assertRaises(ValueError):
-            infra.create_node('missing', 'n2', 'edge')
+            infra.create_node('missing', 'n2')
         for memory in (0, -1, 1.5, True):
             with self.subTest(memory=memory):
                 with self.assertRaises(ValueError):

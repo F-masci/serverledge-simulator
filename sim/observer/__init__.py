@@ -1,7 +1,14 @@
 """Observer condiviso e catalogo delle notifiche pubblicate dal simulatore."""
 
-from .notifications import ContainerStarted, ContainerStopped, Notification, NotificationType, FinalStatistics, SimulationError
+from .notifications import (
+    ContainerStarted, ContainerStateChanged, ContainerStopped, FinalStatistics, NodeRegistered, Notification,
+    NotificationType, RequestAccepted, RequestArrived, RequestCompleted, RequestDelivered, RequestForwarded,
+    RequestQueued, RequestRejected, SimulationError,
+)
 from .observer import observer
-from .notifications import RequestAccepted, RequestArrived, RequestCompleted, RequestRejected
 
-__all__ = ['RequestAccepted', 'RequestArrived', 'RequestCompleted', 'RequestRejected', 'ContainerStarted', 'ContainerStopped', 'Notification', 'NotificationType', 'FinalStatistics', 'SimulationError', 'observer']
+__all__ = [
+    'RequestAccepted', 'RequestArrived', 'RequestCompleted', 'RequestDelivered', 'RequestForwarded',
+    'RequestQueued', 'RequestRejected', 'ContainerStarted', 'ContainerStateChanged', 'ContainerStopped',
+    'NodeRegistered', 'Notification', 'NotificationType', 'FinalStatistics', 'SimulationError', 'observer',
+]

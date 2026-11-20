@@ -19,7 +19,6 @@ cpus = 1
 
 [[regions.edge.infrastructure.rings.nodes]]
 name = "edge-1"
-area = "local"
 policy = "cloudonly"
 remote_region = "cloud"
 

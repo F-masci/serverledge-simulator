@@ -2,7 +2,7 @@
 
 import logging
 
-from .notifications import Notification
+from ..observer.notifications import Notification
 
 
 _logger = logging.getLogger('sim.notifications')

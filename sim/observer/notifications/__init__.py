@@ -1,9 +1,17 @@
 """Catalogo pubblico delle notifiche, organizzate per categoria."""
 
-from .container import ContainerStarted, ContainerStopped
+from .container import ContainerStarted, ContainerStateChanged, ContainerStopped
 from .error import SimulationError
 from .notification import Notification, NotificationType
 from .metrics import FinalStatistics
-from .request import RequestAccepted, RequestArrived, RequestCompleted, RequestRejected
+from .node import NodeRegistered
+from .request import (
+    RequestAccepted, RequestArrived, RequestCompleted, RequestDelivered, RequestForwarded, RequestQueued,
+    RequestRejected,
+)
 
-__all__ = ['RequestAccepted', 'RequestArrived', 'RequestCompleted', 'RequestRejected', 'ContainerStarted', 'ContainerStopped', 'Notification', 'NotificationType', 'FinalStatistics', 'SimulationError']
+__all__ = [
+    'RequestAccepted', 'RequestArrived', 'RequestCompleted', 'RequestDelivered', 'RequestForwarded',
+    'RequestQueued', 'RequestRejected', 'ContainerStarted', 'ContainerStateChanged', 'ContainerStopped',
+    'NodeRegistered', 'Notification', 'NotificationType', 'FinalStatistics', 'SimulationError',
+]

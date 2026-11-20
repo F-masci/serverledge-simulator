@@ -7,7 +7,8 @@ from pathlib import Path
 from .io.scenario import Scenario
 from .core.simulation import Simulation
 from .observer import SimulationError, observer
-from .observer.logger import log_notification
+from .utils.logger import log_notification
+from .utils.report import format_final_report
 
 from .utils.validation import nonnegative_integer
 
@@ -42,12 +43,14 @@ def main() -> None:
     try:
         simulation = Simulation(scenario)
         statistics = simulation.run(arrivals=args.arrivals)
-        observer.notify(statistics)
     except Exception as error:
         observer.notify(SimulationError(exception=error, failed_event='Simulation Loop'))
         raise SystemExit(2) from error
     finally:
         unsubscribe_logger()
+
+    observer.notify(statistics)
+    print(format_final_report(statistics, args.scenario))
 
 if __name__ == '__main__':
     main()

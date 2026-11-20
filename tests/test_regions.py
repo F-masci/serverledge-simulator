@@ -21,7 +21,7 @@ def simulated_region(*, latency=0, **node_settings):
         'offload_latency_s': latency,
         'infrastructure': {'rings': [{
             'id': 'amd64', 'arch': 'amd64', 'memory_mb': 128, 'cpus': 1,
-            'nodes': [{'name': 'worker', 'area': 'local', **node_settings}],
+            'nodes': [{'name': 'worker', **node_settings}],
         }]},
     }
 
@@ -63,11 +63,15 @@ class RegionsTest(unittest.TestCase):
         self.assertEqual(snapshot['regions']['cloud']['nodes_by_ring'], {})
         self.assertEqual(snapshot['regions']['cloud']['invocations']['completed'], 1)
 
-        arrived, admitted, completed = self.notifications
-        self.assertIs(arrived.type, NotificationType.REQUEST_ARRIVED)
-        self.assertIs(admitted.type, NotificationType.REQUEST_ACCEPTED)
-        self.assertIs(completed.type, NotificationType.REQUEST_COMPLETED)
-        self.assertEqual({event.request_id for event in self.notifications}, {arrived.request_id})
+        registered, arrived, forwarded, delivered, admitted, completed = self.notifications
+        self.assertEqual([event.type for event in self.notifications], [
+            NotificationType.NODE_REGISTERED, NotificationType.REQUEST_ARRIVED,
+            NotificationType.REQUEST_FORWARDED, NotificationType.REQUEST_DELIVERED,
+            NotificationType.REQUEST_ACCEPTED, NotificationType.REQUEST_COMPLETED,
+        ])
+        self.assertEqual(registered.region, 'edge')
+        self.assertEqual((forwarded.source_region, forwarded.region, delivered.sim_time_s), ('edge', 'cloud', 0.125))
+        self.assertEqual({event.request_id for event in (forwarded, delivered, admitted, completed)}, {arrived.request_id})
         self.assertEqual((arrived.region, completed.region), ('edge', 'cloud'))
         self.assertIsNone(completed.node_id)
         self.assertIsNone(completed.container_id)
@@ -139,9 +143,33 @@ class RegionsTest(unittest.TestCase):
         request, = requests
         self.assertIs(request.status, RequestStatus.REJECTED)
         self.assertFalse(request.can_offload)
-        self.assertEqual((request.entry_region, request.region), ('edge', 'relay'))
+        self.assertIs(request._entry_region, simulation.regions['edge'])
+        self.assertIs(request.region, simulation.regions['relay'])
+        self.assertIs(request._infrastructure, simulation.regions['relay'].infrastructure)
+        self.assertIs(request._ring, request._infrastructure.rings['amd64'])
+        payload = request.to_dict()
+        self.assertEqual((payload['entry_region'], payload['region']), ('edge', 'relay'))
+        self.assertEqual(payload['ring_id'], 'amd64')
         self.assertEqual(stats['total']['rejected'], 1)
         self.assertEqual(stats['regional_offloads'], [{'source': 'edge', 'destination': 'relay', 'count': 1}])
+
+    def test_remote_region_uses_the_balancer_or_checks_the_registered_node(self):
+        cloud = simulated_region()
+        cloud['infrastructure']['rings'].insert(0, {
+            'id': 'arm', 'arch': 'arm64', 'memory_mb': 128, 'cpus': 1,
+            'nodes': [{'name': 'first', 'machine_tag': 'a'}],
+        })
+        function = dict(FUNCTION, supported_archs=['amd64'])
+        for enabled in (False, True):
+            with self.subTest(has_load_balancer=enabled):
+                scenario = Scenario([function], invocation={'can_offload': True}, regions={
+                    'edge': simulated_region(policy='cloudonly', remote_region='cloud'),
+                    'cloud': dict(cloud, has_load_balancer=enabled),
+                })
+                stats = Simulation(scenario).run(arrivals=1).metrics
+                self.assertEqual(stats['regions']['cloud']['invocations']['accepted'], int(enabled))
+                self.assertEqual(stats['regions']['edge']['invocations']['rejected'], int(not enabled))
+                self.assertEqual(len(stats['regional_offloads']), int(enabled))
 
     def test_entry_region_can_override_primary_and_complete_immediately(self):
         scenario = Scenario([FUNCTION], primary_region='edge', regions={
@@ -156,7 +184,7 @@ class RegionsTest(unittest.TestCase):
         self.assertEqual(stats['regional_offloads'], [])
 
     def test_routing_and_edge_neighbors_stay_in_their_region(self):
-        scenario = Scenario([dict(FUNCTION, first_arrival_time=2)], scheduler={'nearby_interval': 1}, regions={
+        scenario = Scenario([dict(FUNCTION, first_arrival_time=2)], regions={
             'edge': simulated_region(policy='edgeonly'),
             'other': simulated_region(),
         }, invocation={'can_offload': True})

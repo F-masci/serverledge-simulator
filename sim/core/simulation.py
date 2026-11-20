@@ -9,20 +9,18 @@ from types import MappingProxyType
 from uuid import uuid4
 
 from sim.io.scenario import Scenario
-from sim.model.container import ContainerState, DockerContainer
+from sim.model.container import DockerContainer
 from sim.model.events import ArrivalEvent, CompletionEvent, ContainerCleanupEvent, ContainerReadyEvent, ScheduledEvent
 from sim.model.events.region_delivery_event import RegionDeliveryEvent
-from sim.model.events.registry_refresh_event import RegistryRefreshEvent
 from sim.model.infrastructure import Infrastructure
 from sim.model.load_balancer import build_load_balancer
 from sim.model.node import Node
-from sim.model.offloading import NodeScheduling, SchedulingPolicy
+from sim.model.offloading import NodeScheduling
 from sim.model.region import Region
 from sim.model.request import Request, RequestStatus
-from sim.observer import (
-    ContainerStarted, ContainerStopped, FinalStatistics, SimulationError,
-)
+from sim.observer import FinalStatistics, SimulationError
 from sim.observer.observer import _Observer, observer as shared_observer
+from sim.utils.report import format_metrics
 from sim.utils.validation import nonnegative_integer
 
 from .engine import SimulationEngine
@@ -34,19 +32,22 @@ class SimulationContext:
     """Contesto condiviso della simulazione.
 
     Fornisce accesso al motore, all'infrastruttura, alle metriche della
-    replica e all'observer condiviso.
+    replica e al suo observer.
     """
 
     scenario: Scenario
     simulation: 'Simulation'
     regions: Mapping[str, Region]
     metrics: SimulationMetrics
-    observer: _Observer = field(default=shared_observer, init=False, repr=False, compare=False)
+    observer: _Observer = field(init=False, repr=False, compare=False)
     engine: SimulationEngine = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         # Inizializza il motore con il contesto.
         object.__setattr__(self, 'engine', SimulationEngine(self))
+        observer = _Observer(self, parent=shared_observer)
+        observer.subscribe(self.metrics.on_notification, propagate_errors=True)
+        object.__setattr__(self, 'observer', observer)
 
     @property
     def infrastructure(self) -> Infrastructure | None:
@@ -75,11 +76,10 @@ class Simulation:
         if invocation.entry_node is not None:
             infrastructure = self._entry_region.infrastructure
             assert infrastructure is not None
-            self._entry_node = infrastructure.resolve_node(invocation.entry_node, area=invocation.entry_area)
+            self._entry_node = infrastructure.resolve_node(invocation.entry_node)
 
         # Flag per evitare di avviare la simulazione più volte
         self._started = False
-        self._ctx.observer.bind_context(self._ctx)
 
     @property
     def regions(self) -> Mapping[str, Region]:
@@ -88,25 +88,29 @@ class Simulation:
     def _build_regions(self, scenario: Scenario) -> Mapping[str, Region]:
         regions = {}
         for name, config in scenario.regions.items():
-            infrastructure = (
-                self._build_infrastructure(scenario, name) if config.infrastructure is not None else None
+            build_infrastructure = (
+                partial(self._build_infrastructure, scenario) if config.infrastructure is not None else None
             )
             regions[name] = Region(
-                name, infrastructure, config.service_time_s, config.offload_latency_s,
-                config.offload_latency_by_source_s,
+                name, build_infrastructure=build_infrastructure, service_time_s=config.service_time_s,
+                offload_latency_s=config.offload_latency_s,
+                offload_latency_by_source_s=config.offload_latency_by_source_s,
+                has_load_balancer=config.has_load_balancer,
             )
+        self._configure_schedulers(scenario, regions)
         return MappingProxyType(regions)
 
-    def _build_infrastructure(self, scenario: Scenario, name: str) -> Infrastructure:
+    def _build_infrastructure(self, scenario: Scenario, region: Region) -> Infrastructure:
         """Crea ring e nodi della singola regione."""
+        name = region.name
         config = scenario.regions[name].infrastructure
         assert config is not None
         stream_id = 'load_balancer' if name == scenario.primary_region else f'load_balancer/{name}'
         load_balancer = build_load_balancer(scenario.load_balancer, seed=scenario.seed, stream_id=stream_id)
-        scheduler = scenario.scheduler
         infrastructure = Infrastructure(
-            load_balancer, offloading_cache_validity=scheduler.offloading_cache_validity,
-            load_balancer_areas=config.load_balancer_areas, forward_region=self._forward_region,
+            load_balancer,
+            forward_region=self._forward_region,
+            region=region,
         )
         for ring in config.rings:
             infrastructure.create_ring(
@@ -114,72 +118,82 @@ class Simulation:
             )
             for node in ring.nodes:
                 infrastructure.create_node(
-                    ring.id, node.name, node.area, node.machine_tag,
+                    ring.id, node.name, node.machine_tag,
                     idle_timeout=scenario.containers.idle_timeout,
                     queue_capacity=scenario.scheduler.queue_capacity,
                 )
-        for ring in config.rings:
-            live_ring = infrastructure.rings[ring.id]
-            for node, node_config in zip(live_ring, ring.nodes, strict=True):
-                neighbors = None
-                if node_config.nearest_neighbors is not None:
-                    neighbors = tuple(
-                        infrastructure.resolve_node(peer, area=node_config.area) for peer in node_config.nearest_neighbors
-                    )
-                infrastructure.configure_scheduler(node, NodeScheduling(
-                    policy=node_config.policy or scheduler.policy,
-                    fallback_local=(
-                        scheduler.fallback_local if node_config.fallback_local is None else node_config.fallback_local
-                    ),
-                    remote_area=node_config.remote_area,
-                    nearest_neighbors=neighbors,
-                    remote_region=node_config.remote_region,
-                ))
         return infrastructure
+
+    @staticmethod
+    def _configure_schedulers(scenario: Scenario, regions: Mapping[str, Region]) -> None:
+        """Risolvi i riferimenti remoti dopo la costruzione di tutte le regioni."""
+        scheduler = scenario.scheduler
+        for name, region in regions.items():
+            infrastructure = region.infrastructure
+            config = scenario.regions[name].infrastructure
+            if infrastructure is None or config is None:
+                continue
+            for ring in config.rings:
+                live_ring = infrastructure.rings[ring.id]
+                for node, node_config in zip(live_ring, ring.nodes, strict=True):
+                    neighbors = None
+                    if node_config.nearest_neighbors is not None:
+                        neighbors = tuple(
+                            infrastructure.resolve_node(peer) for peer in node_config.nearest_neighbors
+                        )
+                    infrastructure.configure_scheduler(node, NodeScheduling(
+                        policy=node_config.policy or scheduler.policy,
+                        fallback_local=(
+                            scheduler.fallback_local if node_config.fallback_local is None else node_config.fallback_local
+                        ),
+                        nearest_neighbors=neighbors,
+                        remote_region=regions[node_config.remote_region] if node_config.remote_region is not None else None,
+                    ))
 
     def submit(self, request: Request, *, region: str | None = None) -> Node | None:
         """Consegna un arrivo esterno alla regione indicata o all'ingresso dello scenario."""
         request.ensure_created()
         entry = self._entry_region if region is None else self.regions[region]
         node = self._entry_node if region is None else None
-        area = self._ctx.scenario.invocation.entry_area if region is None else None
-        self._ctx.metrics.record_external_arrival(entry.name)
         self._ctx.observer.notify_arrival(request, region=entry.name)
-        destination = entry.submit(request, now=self._ctx.engine.now, node=node, area=area)
-        self._record_submission(request)
+        destination = entry.submit(request, now=self._ctx.engine.now, node=node)
+        self._notify_submission(request)
         return destination
 
-    def _forward_region(self, request: Request, name: str) -> Node | None:
-        destination = self.regions[name]
+    def _forward_region(self, request: Request, destination: Region, source_node: Node) -> Node | None:
         source = request.region
         assert source is not None
-        self._ctx.metrics.record_offload(source, name)
-        delay = destination.offload_latency_from(source) / 2
-        request.start_transfer(name, delay)
+        target = None
+        if destination.infrastructure is not None and not destination.has_load_balancer:
+            target = destination.first_registered_node()
+            if target is None or not request.function.supports_arch(target.id.arch):
+                request.reject('out_of_resources', node=source_node)
+                return None
+        request.mark_offloaded(source_node)
+        delay = destination.offload_latency_from(source.name) / 2
+        request.start_transfer(destination, delay)
+        self._ctx.observer.notify_request_forwarded(request, source.name)
         if delay == 0:
-            return destination.submit(request, now=self._ctx.engine.now)
-        self._ctx.engine.schedule_after(delay, RegionDeliveryEvent(request, destination, ctx=self._ctx))
+            self._ctx.observer.notify_request_delivered(request)
+            return destination.submit(request, now=self._ctx.engine.now, node=target)
+        self._ctx.engine.schedule_after(delay, RegionDeliveryEvent(request, destination, target, ctx=self._ctx))
         return None
 
-    def deliver_region(self, request: Request, region: Region) -> None:
+    def deliver_region(self, request: Request, region: Region, node: Node | None = None) -> None:
         now = self._ctx.engine.now
-        self._ctx.metrics.record_transfer(request, now, -1)
-        region.submit(request, now=now)
-        self._record_submission(request)
+        self._ctx.observer.notify_request_delivered(request)
+        region.submit(request, now=now, node=node)
+        self._notify_submission(request)
 
-    def _record_submission(self, request: Request) -> None:
-        ctx = self._ctx
-        now = ctx.engine.now
-        if request.status is RequestStatus.IN_TRANSIT:
-            ctx.metrics.record_transfer(request, now, 1)
-            return
-
-        ctx.metrics.record_submission(request, now)
+    def _notify_submission(self, request: Request) -> None:
+        observer = self._ctx.observer
         if request.status is RequestStatus.ACCEPTED:
-            ctx.observer.notify_request_accepted(request)
+            observer.notify_request_accepted(request)
             self._schedule_execution(request)
         elif request.status is RequestStatus.REJECTED:
-            ctx.observer.notify_request_rejected(request)
+            observer.notify_request_rejected(request)
+        elif request.status is RequestStatus.QUEUED:
+            observer.notify_request_queued(request)
 
     def run(self, arrivals: int) -> FinalStatistics:
         """Avvia la replica e la esegue senza orizzonte, salvo un limite di arrivi."""
@@ -201,9 +215,6 @@ class Simulation:
         """Pianifica un primo arrivo per ogni funzione, in ordine di configurazione."""
         if self._started:
             raise RuntimeError('Simulazione già avviata')
-        # Una replica può essere costruita prima del suo effettivo avvio.
-        self._ctx.observer.bind_context(self._ctx)
-
         # Inizializza l'infrastruttura e registra i nodi
         # per la raccolta delle metriche.
         #
@@ -214,9 +225,8 @@ class Simulation:
                 continue
             for ring_id, ring in region.infrastructure.rings.items():
                 for node in ring:
-                    self._ctx.metrics.register_node(node, self._ctx.engine.now)
+                    self._ctx.observer.notify_node_registered(node, region.name, ring_id)
                     self._bind_node_callbacks(node, region.name, ring_id)
-            self._start_offloading_monitoring(region.name, region.infrastructure)
 
         # Pianifica il primo arrivo per ogni funzione registrata nello scenario.
         first_arrivals = []
@@ -236,38 +246,21 @@ class Simulation:
         self._started = True
         return tuple(first_arrivals)
 
-    def _start_offloading_monitoring(self, name: str, infrastructure: Infrastructure) -> None:
-        ctx = self._ctx
-        scheduler = ctx.scenario.scheduler
-        topology = ctx.scenario.regions[name].infrastructure
-        assert topology is not None
-        configs = [node for ring in topology.rings for node in ring.nodes]
-        if any((node.policy or scheduler.policy) is SchedulingPolicy.EDGE_ONLY for node in configs):
-            refresh = RegistryRefreshEvent(infrastructure.refresh_neighbors, scheduler.nearby_interval, ctx=ctx)
-            ctx.engine.schedule_after(refresh.interval, refresh)
-        if any(node.remote_area and (node.policy or scheduler.policy) in (
-            SchedulingPolicy.EDGE_CLOUD, SchedulingPolicy.CLOUD_ONLY,
-        ) for node in configs):
-            infrastructure.refresh_remote_targets()
-            refresh = RegistryRefreshEvent(
-                infrastructure.refresh_remote_targets, scheduler.monitoring_interval, ctx=ctx,
-            )
-            ctx.engine.schedule_after(refresh.interval, refresh)
-
     def _bind_node_callbacks(self, node: Node, region: str, ring_id: str) -> None:
         """Associa le callback per gli eventi dei nodi."""
-        node.on_container_state_change = partial(self._record_container_state, region, ring_id)
+        node.on_container_state_change = partial(self._ctx.observer.notify_container_state, region, ring_id)
         node.on_container_idle = self._schedule_container_cleanup
         node.on_dequeue = self._request_dequeued
 
     def _final_statistics(self) -> FinalStatistics:
         """Prepara la notifica dopo il completamento di run()."""
+        metrics = self.metrics_snapshot()
         return FinalStatistics(
             run_id=self.run_id,
             sim_time_s=self._ctx.engine.now,
             outcome='completed',
-            metrics=self.metrics_snapshot(),
-            summary=str(self._ctx.metrics),
+            metrics=metrics,
+            summary=format_metrics(metrics),
         )
 
 
@@ -295,9 +288,9 @@ class Simulation:
             self._ctx.engine.schedule_after(cold_start_time, ContainerReadyEvent(request, ctx=self._ctx),)
 
     def _request_dequeued(self, request: Request) -> None:
-        """Registra la rimozione della richiesta dalla coda e notifica l'osservatore."""
-        self._ctx.metrics.record_dequeue(request, self._ctx.engine.now)
-        self._ctx.observer.notify_request_accepted(request)
+        """Notifica l'ammissione della richiesta uscita dalla FIFO."""
+        queue_wait = self._ctx.engine.now - request.region_arrival_time
+        self._ctx.observer.notify_request_accepted(request, queue_wait_s=queue_wait)
         self._schedule_execution(request)
 
 
@@ -310,23 +303,6 @@ class Simulation:
             sim_time_s=self._ctx.engine.now,
             failed_event=type(event.event).__name__,
             exception=error,
-        ))
-
-    def _record_container_state(
-        self, region: str, ring_id: str, node: Node, container: DockerContainer, previous: ContainerState | None,
-    ) -> None:
-        now = self._ctx.engine.now
-        self._ctx.metrics.record_container_state(node, container, previous, now)
-
-        if previous is ContainerState.CREATING and container.state in (ContainerState.BUSY, ContainerState.IDLE):
-            notification = ContainerStarted
-        elif previous is ContainerState.IDLE and container.state is ContainerState.DESTROYED:
-            notification = ContainerStopped
-        else:
-            return
-
-        self._ctx.observer.notify(notification(
-            self.run_id, now, ring_id, node.id.key, container.id, container.function.name, region=region,
         ))
 
     def _schedule_container_cleanup(self, node: Node, container: DockerContainer) -> None:
