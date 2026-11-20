@@ -4,8 +4,7 @@ from collections.abc import Callable
 import logging
 from typing import TYPE_CHECKING
 
-from . import RequestCompleted
-from .notifications import Notification, RequestArrived, RequestAccepted, RequestRejected
+from .notifications import Notification, RequestArrived, RequestAccepted, RequestCompleted, RequestRejected
 from ..model.request import Request
 from ..utils.ensure import ensure_node, ensure_container
 
@@ -105,7 +104,7 @@ class _Observer:
             request_id=request.id,
             function=request.function.name,
             node_id=node.id.key,
-            container_id=container.id.key,
+            container_id=container.id,
             response_time_s=ctx.engine.now - request.arrival_time,
         )
         self.notify(notification)

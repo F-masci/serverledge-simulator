@@ -92,7 +92,6 @@ class RoutingTest(unittest.TestCase):
         self.assertIs(infra.submit(follower), node)
 
         active.complete(1)
-        self.assertEqual(tuple(node.dispatch_waiting()), ())
         self.assertIs(oversized.status, RequestStatus.QUEUED)
         self.assertIs(follower.status, RequestStatus.QUEUED)
         new_arrival = Request(function())

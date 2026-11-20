@@ -13,8 +13,7 @@ from sim.model.infrastructure import Infrastructure
 from sim.model.node import Node
 from sim.model.request import Request, RequestStatus
 from sim.observer import (
-    ContainerStarted, ContainerStopped, FinalStatistics, RequestArrived,
-    RequestCompleted, RequestRejected, SimulationError,
+    ContainerStarted, ContainerStopped, FinalStatistics, SimulationError,
 )
 from sim.observer.observer import _Observer, observer as shared_observer
 from sim.utils.validation import nonnegative_integer
@@ -94,11 +93,7 @@ class Simulation:
         for ring_id, ring in self._ctx.infrastructure.rings.items():
             for node in ring:
                 self._ctx.metrics.register_node(node, self._ctx.engine.now)
-                node.on_container_state_change = partial(self._record_container_state, ring_id)
-
-                # I nodi creati dallo scenario partono vuoti: il primo evento di
-                # pulizia viene pianificato dalla callback alla transizione a IDLE.
-                node.on_container_idle = self._schedule_container_cleanup
+                self._bind_node_callbacks(node, ring_id)
 
         # Pianifica il primo arrivo per ogni funzione registrata nello scenario.
         first_arrivals = []
@@ -118,6 +113,12 @@ class Simulation:
         self._started = True
         return tuple(first_arrivals)
 
+    def _bind_node_callbacks(self, node: Node, ring_id: str) -> None:
+        """Associa le callback per gli eventi dei nodi."""
+        node.on_container_state_change = partial(self._record_container_state, ring_id)
+        node.on_container_idle = self._schedule_container_cleanup
+        node.on_dequeue = self._request_dequeued
+
     def _final_statistics(self) -> FinalStatistics:
         """Prepara la notifica dopo il completamento di run()."""
         return FinalStatistics(
@@ -130,34 +131,34 @@ class Simulation:
 
 
 
-
-
-
-    def record_completion(self, request: Request, arrival_time: float) -> None:
-        now = self._ctx.engine.now
-        self._ctx.metrics.record_completion(request, now, arrival_time)
-        assert request.node is not None and request.container is not None
-        self._ctx.observer.notify(RequestCompleted(
-            self.run_id, now, request.id, request.function.name,
-            node_id=request.node.id.key,
-            container_id=request.container.id,
-            response_time_s=now - arrival_time,
-        ))
-
-    def dispatch_waiting(self, node: Node) -> None:
-        for request in node.dispatch_waiting():
-            self._ctx.metrics.record_dequeue(request, self._ctx.engine.now)
-            self._schedule_execution(request)
-
     def _schedule_execution(self, request: Request) -> None:
+        """Pianifica l'esecuzione della richiesta sul nodo assegnato."""
+
+        # Se la richiesta è "warm", pianifica un CompletionEvent dopo la durata di servizio.
         if request.warm:
             duration = request.service_duration
-            assert duration is not None
-            self._ctx.engine.schedule_after(duration, CompletionEvent(request, request.arrival_time, ctx=self._ctx))
+            if duration is None:
+                raise ValueError('La durata di servizio della richiesta non può essere None')
+
+            self._ctx.engine.schedule_after(duration, CompletionEvent(request, ctx=self._ctx))
+
+        # Se la richiesta è "cold", pianifica un ContainerReadyEvent
+        # dopo il tempo di cold start della funzione.
         else:
-            self._ctx.engine.schedule_after(
-                request.function.cold_start_time, ContainerReadyEvent(request, request.arrival_time, ctx=self._ctx),
-            )
+            cold_start_time = request.function.cold_start_time
+            if cold_start_time is None:
+                raise ValueError('Il tempo di cold start della funzione non può essere None')
+
+            self._ctx.engine.schedule_after(cold_start_time, ContainerReadyEvent(request, ctx=self._ctx),)
+
+    def _request_dequeued(self, request: Request) -> None:
+        """Registra la rimozione della richiesta dalla coda e notifica l'osservatore."""
+        self._ctx.metrics.record_dequeue(request, self._ctx.engine.now)
+        self._ctx.observer.notify_request_accepted(request)
+        self._schedule_execution(request)
+
+
+
 
     def notify_event_error(self, event: ScheduledEvent, error: Exception) -> None:
         """Pubblica il fallimento di un'occorrenza per questa replica."""

@@ -33,9 +33,10 @@ class ArrivalEvent(Event):
         if request.status is RequestStatus.ACCEPTED:
             # La richiesta è stata accettata e assegnata a un nodo.
             self._handle_accepted(request)
-        else:
-            # La richiesta è stata rifiutata.
+        elif request.status is RequestStatus.REJECTED:
             self._handle_rejected(request)
+        elif request.status is RequestStatus.QUEUED:
+            self.ctx.metrics.record_submission(request, self.ctx.engine.now)
 
     def _schedule_next_arrival(self) -> None:
         """Schedula il prossimo arrivo della funzione associata all’evento."""
@@ -50,7 +51,9 @@ class ArrivalEvent(Event):
             raise ValueError('Interarrivo troppo piccolo per avanzare il tempo simulato')
 
         # Schedula il prossimo evento di arrivo.
-        event = ArrivalEvent(self.function, on_accepted=self.on_accepted, ctx=self.ctx)
+        event = ArrivalEvent(
+            self.function, on_accepted=self.on_accepted, on_rejected=self.on_rejected, ctx=self.ctx,
+        )
         engine.schedule(next_time, event)
 
     def _submit_request(self) -> Request:
@@ -62,6 +65,7 @@ class ArrivalEvent(Event):
 
         duration = sampler.service.sample()
         request = Request(self.function, service_duration=duration, arrival_time=engine.now)
+        self.ctx.observer.notify_arrival(request)
         self.ctx.infrastructure.submit(request)
         return request
 

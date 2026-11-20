@@ -59,7 +59,8 @@ class SimulationTest(unittest.TestCase):
         Simulation(scenario).run(arrivals=4)
 
         payloads = [json.loads(json.dumps(event.to_dict())) for event in notifications
-                    if event.type.value.startswith('request.')]
+                    if event.type in (NotificationType.REQUEST_ARRIVED, NotificationType.REQUEST_REJECTED,
+                                      NotificationType.REQUEST_COMPLETED)]
         first, second, rejected = [payload['data'] for payload in payloads[:3]]
         self.assertEqual([payload['type'] for payload in payloads[:3]],
                          ['request.arrived', 'request.arrived', 'request.rejected'])
@@ -324,20 +325,32 @@ class SimulationTest(unittest.TestCase):
             path.write_text(json.dumps(definition))
             simulation = Simulation(Scenario.load(path))
 
-        simulation.start()
-        simulation.engine.run(until=2)
+        notifications: list[Notification] = []
+        self.addCleanup(observer.subscribe(notifications.append))
+        simulation._start()
+        engine = simulation._ctx.engine
+        while engine.now < 2:
+            self.assertTrue(engine.step())
         totals = simulation.metrics_snapshot()['total']
         # A t=2 la prima richiesta è attiva, la seconda attende e la terza è scartata.
         self.assertEqual((totals['arrivals'], totals['accepted'], totals['waiting'], totals['rejected']),
                          (3, 1, 1, 1))
         self.assertEqual(totals['pending'], 2)
-        simulation.engine.run(until=2.5)
+        self.assertTrue(engine.step())
+        self.assertEqual(engine.now, 2.5)
         totals = simulation.metrics_snapshot()['total']
         # Il primo completamento libera il container e avvia la testa con warm start.
         self.assertEqual((totals['arrivals'], totals['accepted'], totals['waiting'], totals['warm_starts']),
                          (3, 2, 0, 1))
         self.assertEqual(totals['mean_queue_wait_s'], 1.5)
-        simulation.engine.run(until=5)
+        # Il completamento attiva la coda sul nodo e la callback pubblica
+        # l'ammissione della richiesta arrivata a t=1.
+        at_completion = [event for event in notifications if event.to_dict()['sim_time_s'] == 2.5]
+        self.assertEqual([event.type for event in at_completion], [
+            NotificationType.REQUEST_COMPLETED, NotificationType.REQUEST_ACCEPTED,
+        ])
+        while engine.now < 5:
+            self.assertTrue(engine.step())
         totals = simulation.metrics_snapshot()['total']
         self.assertEqual(totals['completed'], 2)
         self.assertEqual(totals['mean_response_time_s'], 3.25)

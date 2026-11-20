@@ -132,6 +132,7 @@ class Node:
         self._queue: deque[Request] = deque()
         self._container_ids = count(1)
         self.on_container_state_change: Callable[[Node, DockerContainer, ContainerState | None], None] | None = None
+        self.on_dequeue: Callable[[Request], None] | None = None
         self.on_container_idle: Callable[[Node, DockerContainer], None] | None = None
 
     @property
@@ -240,6 +241,7 @@ class Node:
             self.resources._deactivate(container.function)
             self._notify_container_state(container, ContainerState.BUSY)
             self._notify_container_idle(container)
+        self.dispatch_waiting()
 
     def _notify_container_state(self, container: DockerContainer, previous: ContainerState | None) -> None:
         if self.on_container_state_change is not None:
@@ -297,16 +299,20 @@ class Node:
         self._queue.append(request)
         return True
 
-    def dispatch_waiting(self) -> Iterator[Request]:
+    def dispatch_waiting(self) -> None:
         """Dopo un completamento ammette le richieste finché la testa può partire."""
         while self._queue:
             request = self._queue[0]
             container = self.acquire(request.function)
             if container is None:
                 break
-            self._queue.popleft()
-            request._accept(self, container, warm=container.state is not ContainerState.CREATING)
-            yield request
+            self._dequeue(container)
+
+    def _dequeue(self, container: DockerContainer) -> None:
+        request = self._queue.popleft()
+        request._accept(self, container, warm=container.state is not ContainerState.CREATING)
+        if self.on_dequeue is not None:
+            self.on_dequeue(request)
 
     def __repr__(self) -> str:
         return self.id.key
