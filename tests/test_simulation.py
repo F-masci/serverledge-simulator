@@ -159,7 +159,7 @@ class SimulationTest(unittest.TestCase):
         examples = Path(__file__).resolve().parents[1] / 'examples/scenarios'
         scenario = Scenario.load(examples / 'startup.toml')
         self.assertEqual(scenario, Scenario.load(examples / 'startup.json'))
-        function = scenario.get_function('hello')
+        function = scenario.function_registry.get('hello')
         profile = function.profile
         baseline = Simulation(Scenario((function,), seed=scenario.seed))
         twice_as_fast = Simulation(Scenario(
@@ -238,17 +238,17 @@ class SimulationTest(unittest.TestCase):
             path.write_text('[function]\nname = "hello"\n'
                             'runtime = "python314"\nmemory_mb = 128\ncpu_demand = 1.0\n'
                             'arrival_rate = 2\nservice_rate = 4\nfirst_arrival_time = 0\n', encoding='utf-8')
-            self.assertEqual(Scenario.load(path).functions, (profiled_function('hello', 2, 4),))
+            self.assertEqual(tuple(Scenario.load(path).function_registry.values()), (profiled_function('hello', 2, 4),))
 
     def test_registry_contains_configured_functions_used_by_arrival_events(self):
         """L'evento riceve una copia per replica della funzione registrata con le risorse da file."""
         examples = Path(__file__).resolve().parents[1] / 'examples/scenarios'
         scenario = Scenario.load(examples / 'startup.toml')
-        resize = scenario.get_function('resize')
+        resize = scenario.function_registry.get('resize')
         self.assertEqual((resize.memory_mb, resize.cpu_demand, resize.max_concurrency), (256, 0.5, 2))
         self.assertEqual(resize.supported_archs, ('amd64',))
         self.assertEqual(resize.profile.service_distribution, 'gamma')
-        self.assertIsNone(scenario.get_function('unknown'))
+        self.assertIsNone(scenario.function_registry.get('unknown'))
         with self.assertRaises(TypeError):
             scenario.function_registry['other'] = resize
         _, second = Simulation(scenario).start()
@@ -267,7 +267,7 @@ class SimulationTest(unittest.TestCase):
         with TemporaryDirectory() as directory:
             path = Path(directory) / 'scenario.json'
             path.write_text(json.dumps({'functions': [definition]}))
-            function = Scenario.load(path).get_function('custom-f')
+            function = Scenario.load(path).function_registry.get('custom-f')
             self.assertEqual(function.runtime, CustomRuntime('demo/app:1'))
             self.assertEqual(function.max_concurrency, 1)  # Vincolo del runtime custom.
             self.assertEqual(function.supported_archs, ('arm64',))
@@ -303,7 +303,7 @@ class SimulationTest(unittest.TestCase):
 
             definition.update(service_distribution='gamma', service_scv=0.5)
             path.write_text(json.dumps({'functions': [definition]}))
-            service = Scenario.load(path).get_function('fixed').sampler.service
+            service = Scenario.load(path).function_registry.get('fixed').sampler.service
             self.assertEqual((service.mean, service.scv), (0.25, 0.5))
 
     def test_configured_fifo_counts_waiting_and_retries_after_completion(self):
@@ -441,11 +441,15 @@ class SimulationTest(unittest.TestCase):
                         service_rate=1, first_arrival_time=0)
         scenario = Scenario([
             dict(workload, name='builtin', runtime='python314', code_load_time=0.125),
+            dict(workload, name='second_builtin', runtime='python314', code_load_time=0.5),
             dict(workload, name='custom', runtime='custom', custom_image=image,
                  supported_archs=['amd64'], code_load_time=0.25),
         ], containers={'startup_times': {image: 0.5}})
 
-        builtin, custom = scenario.functions
+        builtin, second_builtin, custom = scenario.function_registry.values()
+        # Lo stesso runtime integrato è condiviso, inclusi i suoi tempi di avvio.
+        self.assertIs(builtin.runtime, second_builtin.runtime)
+        self.assertEqual(second_builtin.cold_start_time, 1.0)
         self.assertEqual(builtin.runtime.startup_time, 0.5)
         self.assertEqual(custom.runtime.startup_time, 0.5)
         self.assertEqual(builtin.cold_start_time, 0.625)

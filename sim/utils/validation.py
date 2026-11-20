@@ -31,6 +31,10 @@ def nonnegative_integer(value: int, name: str) -> int:
         raise ValueError(f'{name} deve essere un intero non negativo')
     return int(value)
 
+def nonnegative_number(value: float, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) or value < 0:
+        raise ValueError(f'{name} deve essere un numero finito e non negativo')
+    return float(value)
 
 def nonempty_string(value: str, name: str) -> str:
     if not isinstance(value, str) or not value.strip():

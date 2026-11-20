@@ -54,13 +54,29 @@ class Simulation:
         self._ctx = SimulationContext(
             scenario=scenario,
             simulation=self,
-            infrastructure=scenario.build_infrastructure(),
+            infrastructure=self._build_infrastructure(scenario),
             metrics=SimulationMetrics(),
         )
 
         # Flag per evitare di avviare la simulazione più volte
         self._started = False
         self._ctx.observer.bind_context(self._ctx)
+
+    def _build_infrastructure(self, scenario: Scenario) -> Infrastructure:
+        """Crea ring e nodi nuovi per la replica dallo scenario."""
+        # Ogni replica costruisce ring e nodi propri dalla topologia dichiarata.
+        infrastructure = Infrastructure()
+        for ring in scenario.infrastructure.rings:
+            infrastructure.create_ring(
+                ring.id, arch=ring.arch, memory=ring.memory_mb, cpus=ring.cpus, replicas=ring.replicas,
+            )
+            for node in ring.nodes:
+                infrastructure.create_node(
+                    ring.id, node.name, node.area, node.machine_tag,
+                    idle_timeout=scenario.containers.idle_timeout,
+                    queue_capacity=scenario.scheduler.queue_capacity,
+                )
+        return infrastructure
 
     def run(self, arrivals: int) -> FinalStatistics:
         """Avvia la replica e la esegue senza orizzonte, salvo un limite di arrivi."""
@@ -188,7 +204,7 @@ class Simulation:
         """Pianifica il primo passaggio del janitor strettamente dopo la scadenza."""
         expiration = container.expiration_time
         assert expiration is not None  # Il nodo notifica solo container in idle.
-        interval = self._ctx.scenario.container_cleanup_interval
+        interval = self._ctx.scenario.containers.cleanup_interval
         deadline = max(expiration, self._ctx.engine.now)
         tick = floor(deadline / interval) + 1
         check_time = tick * interval
