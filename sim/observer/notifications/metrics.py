@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from dataclasses import dataclass, field
+from logging import INFO
 from typing import Literal
 
 from .notification import Notification, NotificationType
@@ -12,6 +13,7 @@ class FinalStatistics(Notification):
     """Fotografia delle metriche al termine dell'esecuzione."""
 
     type = NotificationType.FINAL_STATISTICS
+    level = INFO
 
     run_id: str
     sim_time_s: float

@@ -1,6 +1,7 @@
 """Notifiche di arrivo, rifiuto e completamento delle richieste."""
 from abc import ABC
 from dataclasses import asdict, dataclass
+from logging import INFO
 
 from .notification import Notification, NotificationType
 
@@ -32,6 +33,7 @@ class RequestArrived(_RequestNotification):
     """La richiesta è arrivata e deve ancora essere inoltrata."""
 
     type = NotificationType.REQUEST_ARRIVED
+    level = INFO
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,7 @@ class RequestAccepted(_RequestNotification):
     """La richiesta è stata ammessa dal nodo indicato."""
 
     type = NotificationType.REQUEST_ACCEPTED
+    level = INFO
 
     node_id: str
 
@@ -48,6 +51,7 @@ class RequestRejected(_RequestNotification):
     """La richiesta è stata rifiutata definitivamente."""
 
     type = NotificationType.REQUEST_REJECTED
+    level = INFO
 
     reason: str
     node_id: str | None
@@ -58,6 +62,7 @@ class RequestCompleted(_RequestNotification):
     """L'invocazione è terminata sul nodo assegnato."""
 
     type = NotificationType.REQUEST_COMPLETED
+    level = INFO
 
     node_id: str
     container_id: str

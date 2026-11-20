@@ -1,6 +1,7 @@
 """Notifiche di errore durante l'esecuzione della simulazione."""
 
 from dataclasses import dataclass, field
+from logging import ERROR
 
 from .notification import Notification, NotificationType
 
@@ -10,6 +11,7 @@ class SimulationError(Notification):
     """Descrive un errore del calendario con dati serializzabili."""
 
     type = NotificationType.SIMULATION_ERROR
+    level = ERROR
 
     exception: Exception = field(repr=False)
     failed_event: str

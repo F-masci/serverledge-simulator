@@ -31,6 +31,11 @@ class Notification(ABC):
     def type(self) -> NotificationType:
         """Identificatore stabile del tipo di notifica."""
 
+    @property
+    @abstractmethod
+    def level(self) -> int:
+        """Livello standard di logging dichiarato dalla classe concreta."""
+
     @abstractmethod
     def __str__(self) -> str:
         """Restituisce il messaggio leggibile usato dal logger."""

@@ -2,13 +2,12 @@
 
 import logging
 
-from .notifications import Notification, NotificationType
+from .notifications import Notification
 
 
 _logger = logging.getLogger('sim.notifications')
 
 
 def log_notification(notification: Notification) -> None:
-    """Delega alla notifica la sua rappresentazione testuale."""
-    level = logging.ERROR if notification.type is NotificationType.SIMULATION_ERROR else logging.INFO
-    _logger.log(level, '%s', notification)
+    """Usa il livello e la rappresentazione testuale della notifica."""
+    _logger.log(notification.level, '%s', notification)

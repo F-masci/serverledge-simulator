@@ -1,6 +1,7 @@
 """Notifiche del ciclo di vita dei container."""
 
 from dataclasses import dataclass
+from logging import INFO
 
 from .notification import Notification, NotificationType
 
@@ -40,6 +41,7 @@ class ContainerStarted(_ContainerNotification):
     """Un nuovo container è pronto per l'esecuzione o il pool idle."""
 
     type = NotificationType.CONTAINER_STARTED
+    level = INFO
 
 
 @dataclass(frozen=True)
@@ -47,3 +49,4 @@ class ContainerStopped(_ContainerNotification):
     """Un container già avviato è stato rimosso e ha liberato la RAM."""
 
     type = NotificationType.CONTAINER_STOPPED
+    level = INFO
