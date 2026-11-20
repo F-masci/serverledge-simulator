@@ -2,7 +2,6 @@
 
 from bisect import bisect_left
 from collections.abc import Callable, Iterator
-from itertools import chain
 
 from .function import Function
 from .node import Node
@@ -110,43 +109,56 @@ class ArchitectureRing:
         """Restituisce il primo candidato del consistent hashing."""
         return next(self._candidates(function), None)
 
-    def submit(self, request: Request) -> Node | None:
-        """Instrada la richiesta nell'anello e notifica l'esito dell'inoltro."""
+    def submit(
+        self, request: Request, *, area: str | None = None,
+        schedule: Callable[[Request, Node], Node | None] | None = None,
+    ) -> Node | None:
+        """Seleziona un nodo idoneo con l'hash e gli consegna l'invocazione."""
         request.ensure_created()
-        node = self._admit_request(request)
-
-        # La richiesta è già accettata, in coda o rifiutata al momento della notifica.
-        if self.on_request_submitted is not None:
-            self.on_request_submitted(self, request, node)
-        return node
-
-    def _admit_request(self, request: Request) -> Node | None:
-        """Tenta l'ammissione in ordine di hash fino al primo nodo disponibile."""
-        candidates = self._candidates(request.function)
-        primary = next(candidates, None)
-        if primary is None:
-            request.reject('no_destination')
+        function = request.function
+        # TODO: separare le risorse correnti dalla vista del proxy, come la
+        # NodeMetricCache Go aggiornata dai polling e dalle risposte dei nodi.
+        node = next((
+            candidate for candidate in self._candidates(function, area=area)
+            if candidate.resources.available_memory >= function.memory_mb
+            and candidate.resources.available_cpus >= function.cpu_demand
+        ), None)
+        if node is None:
             return None
 
-        for node in chain((primary,), candidates):
-            if node.submit(request, reject_on_failure=False):
-                return node
+        if schedule is not None:
+            destination = schedule(request, node)
+        else:
+            destination = node if node.submit(request) else None
+        if self.on_request_submitted is not None:
+            self.on_request_submitted(self, request, destination)
+        return destination
 
-        # Quando tutti i candidati sono saturi, il primo gestisce la coda o il rifiuto.
-        return primary if primary.enqueue_or_reject(request) else None
-
-    def _candidates(self, function: Function) -> Iterator[Node]:
+    def _candidates(self, function: Function, *, area: str | None = None) -> Iterator[Node]:
         """Visita i nodi fisici una sola volta, a partire dal successore dell'hash."""
+        matching = None
+        if function.tag_pattern or area is not None:
+            matching = {
+                node for node in self._nodes
+                if (area is None or node.id.area == area)
+                and function.supports_machine_tag(node.id.machine_tag)
+            }
+            if not matching:
+                return
+        target_count = len(self._nodes) if matching is None else len(matching)
         size = len(self._positions)
         start = bisect_left(self._positions, self._hash(function.name))
         seen: set[Node] = set()
         for offset in range(size):
-            node = self._targets[self._positions[(start + offset) % size]][-1]
-            if node in seen:
+            targets = self._targets[self._positions[(start + offset) % size]]
+            node = targets[-1] if matching is None else next(
+                (target for target in reversed(targets) if target in matching), None,
+            )
+            if node is None or node in seen:
                 continue
             seen.add(node)
             yield node
-            if len(seen) == len(self._nodes):
+            if len(seen) == target_count:
                 break
 
     def _register_replicas(self, node: Node) -> None:

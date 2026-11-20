@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 from .notifications import Notification, RequestArrived, RequestAccepted, RequestCompleted, RequestRejected
 from ..model.request import Request
-from ..utils.ensure import ensure_node, ensure_container
 
 if TYPE_CHECKING:
     from sim.core.simulation import SimulationContext
@@ -53,27 +52,29 @@ class _Observer:
 
     ## Arrival Requests ##
 
-    def notify_arrival(self, request: Request):
+    def notify_arrival(self, request: Request, *, region: str | None = None):
         """Notifica l'arrivo di una richiesta per una funzione."""
         ctx = self._ensure_context()
         notification = RequestArrived(
             run_id=ctx.simulation.run_id,
             sim_time_s=ctx.engine.now,
             request_id=request.id,
-            function=request.function.name
+            function=request.function.name,
+            region=region,
         )
         self.notify(notification)
 
     def notify_request_accepted(self, request: Request):
         """Notifica l'accettazione di una richiesta da parte di un nodo."""
         ctx = self._ensure_context()
-        node = ensure_node(request)
+        node = request.node
         notification = RequestAccepted(
             run_id=ctx.simulation.run_id,
             sim_time_s=ctx.engine.now,
             request_id=request.id,
             function=request.function.name,
-            node_id=node.id.key,
+            node_id=node.id.key if node is not None else None,
+            region=request.region,
         )
         self.notify(notification)
 
@@ -88,6 +89,7 @@ class _Observer:
             function=request.function.name,
             reason=request.rejection_reason or 'unknown',
             node_id=node.id.key if node is not None else None,
+            region=request.region,
         )
         self.notify(notification)
 
@@ -96,15 +98,15 @@ class _Observer:
     def notify_request_completed(self, request: Request):
         """Notifica il completamento di una richiesta."""
         ctx = self._ensure_context()
-        node = ensure_node(request)
-        container = ensure_container(request)
+        node, container = request.node, request.container
         notification = RequestCompleted(
             run_id=ctx.simulation.run_id,
             sim_time_s=ctx.engine.now,
             request_id=request.id,
             function=request.function.name,
-            node_id=node.id.key,
-            container_id=container.id,
+            node_id=node.id.key if node is not None else None,
+            container_id=container.id if container is not None else None,
+            region=request.region,
             response_time_s=ctx.engine.now - request.arrival_time,
         )
         self.notify(notification)

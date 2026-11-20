@@ -1,4 +1,5 @@
 seed = 12345
+load_balancer = "Random"
 
 [scheduler.queue]
 capacity = 0

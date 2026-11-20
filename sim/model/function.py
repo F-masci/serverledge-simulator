@@ -11,6 +11,7 @@ from sim.random.distributions import (
     GammaServiceTime, PoissonArrivalProcess, ServiceTime,
 )
 from sim.random.streams import RandomStreams
+from sim.utils.machine_tag import matches_machine_tag
 from sim.utils.validation import finite_time, nonempty_string
 
 
@@ -202,6 +203,9 @@ class Function:
 
     def supports_arch(self, arch: str) -> bool:
         return arch in self.supported_archs
+
+    def supports_machine_tag(self, machine_tag: str) -> bool:
+        return matches_machine_tag(machine_tag, self.tag_pattern)
 
     def __str__(self) -> str:
         return self.name

@@ -1,6 +1,6 @@
 """Notifiche del ciclo di vita dei container."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from logging import INFO
 
 from .notification import Notification, NotificationType
@@ -14,12 +14,14 @@ class _ContainerNotification(Notification):
     node_id: str
     container_id: str
     function: str
+    region: str | None = field(default=None, kw_only=True)
 
     def __str__(self) -> str:
+        region = f' regione={self.region}' if self.region is not None else ''
         return (
             f'[{self.sim_time_s:.6g} s] {self.type.value} '
             f'container={self.container_id} funzione={self.function} '
-            f'nodo={self.node_id} ring={self.ring_id}'
+            f'nodo={self.node_id} ring={self.ring_id}{region}'
         )
 
     def to_dict(self) -> dict:
@@ -29,6 +31,7 @@ class _ContainerNotification(Notification):
             'sim_time_s': self.sim_time_s,
             'data': {
                 'ring_id': self.ring_id,
+                'region': self.region,
                 'node_id': self.node_id,
                 'container_id': self.container_id,
                 'function': self.function,

@@ -5,24 +5,34 @@ from dataclasses import dataclass
 from ..request import Request, RequestStatus
 from .event import Event
 
+
 @dataclass(frozen=True)
 class CompletionEvent(Event):
     request: Request
 
     def execute(self) -> None:
-        """Conclude la richiesta al tempo corrente del motore."""
+        """Termina il servizio e pianifica l'eventuale ritorno della risposta."""
         now = self.ctx.engine.now
         request = self.request
-        assert request.node is not None and request.container is not None
         if request.status is not RequestStatus.ACCEPTED:
             raise ValueError('Solo una richiesta accettata può essere completata')
+        if request.return_delay > 0:
+            request.begin_response(now)
+            self.ctx.engine.schedule_after(request.return_delay, ResponseEvent(request, ctx=self.ctx))
+            return
 
-        # Registra la conclusione della richiesta nei metriche e notifica l'osservatore.
-        self._record_completion(request)
-        self.request.complete(now)
-
-    def _record_completion(self, request: Request) -> None:
-        """Registra la conclusione della richiesta nei metriche e notifica l'osservatore."""
-        now = self.ctx.engine.now
         self.ctx.metrics.record_completion(request, now)
         self.ctx.observer.notify_request_completed(request)
+        request.complete(now)
+
+
+@dataclass(frozen=True)
+class ResponseEvent(Event):
+    request: Request
+
+    def execute(self) -> None:
+        if self.request.status is not RequestStatus.RESPONDING:
+            raise ValueError('La richiesta non ha una risposta in transito')
+        self.ctx.metrics.record_completion(self.request, self.ctx.engine.now)
+        self.ctx.observer.notify_request_completed(self.request)
+        self.request.finish_response()

@@ -52,7 +52,7 @@ class SimulationTest(unittest.TestCase):
         self.assertEqual(engine.now, time)
 
     def test_request_notifications_correlate_arrivals_with_outcomes(self):
-        """Il primo arrivo completa e il secondo viene rifiutato dal nodo saturo."""
+        """Il primo arrivo completa e il bilanciatore rifiuta il secondo per saturazione."""
         function = Function('hello', 128, 1, BuiltinRuntime('python314'), profile=FunctionProfile(
             arrival_rate=1, service_rate=0.4, first_arrival_time=0,
             arrival_distribution='deterministic', service_distribution='deterministic',
@@ -71,7 +71,7 @@ class SimulationTest(unittest.TestCase):
                          ['request.arrived', 'request.arrived', 'request.rejected'])
         self.assertEqual(rejected['request_id'], second['request_id'])
         self.assertEqual(rejected['reason'], 'out_of_resources')
-        self.assertEqual(rejected['node_id'], 'n1')
+        self.assertIsNone(rejected['node_id'])
         completed, = [payload['data'] for payload in payloads if payload['type'] == 'request.completed']
         self.assertEqual(completed['request_id'], first['request_id'])
         self.assertEqual(completed['response_time_s'], 2.5)
@@ -150,9 +150,53 @@ class SimulationTest(unittest.TestCase):
     def test_example_scenario_formats_define_the_same_workload(self):
         examples = Path(__file__).resolve().parents[1] / 'examples/scenarios'
         scenario = Scenario.load(examples / 'startup.toml')
+        self.assertEqual(scenario.load_balancer, 'Random')
         for suffix in ('json', 'yaml'):
             with self.subTest(format=suffix):
                 self.assertEqual(scenario, Scenario.load(examples / f'startup.{suffix}'))
+
+    def test_scenario_load_balancer_mode_is_validated_and_used_at_startup(self):
+        source = Path(__file__).resolve().parents[1] / 'examples/scenarios/startup.json'
+        definition = json.loads(source.read_text(encoding='utf-8'))
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / 'scenario.json'
+            for mode in ('MAB', 'RoundRobin', 'ArchitectureUnaware'):
+                with self.subTest(mode=mode):
+                    definition['load_balancer'] = mode
+                    path.write_text(json.dumps(definition), encoding='utf-8')
+                    scenario = Scenario.load(path)
+                    self.assertEqual(scenario.load_balancer, mode)
+                    with self.assertRaisesRegex(NotImplementedError, mode):
+                        Simulation(scenario)
+
+            definition['load_balancer'] = 'Other'
+            path.write_text(json.dumps(definition), encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'load_balancer'):
+                Scenario.load(path)
+
+    def test_simulation_seed_controls_ring_selection(self):
+        infrastructure = {'rings': [
+            {'id': name, 'arch': 'amd64', 'memory_mb': 512, 'cpus': 2,
+             'nodes': [{'name': name, 'area': 'edge'}]}
+            for name in ('first', 'second')
+        ]}
+        fun = Function('hello', 128, 1, BuiltinRuntime('python314'), profile=FunctionProfile(
+            arrival_rate=1, service_rate=4, first_arrival_time=0,
+            arrival_distribution='deterministic', service_distribution='deterministic',
+        ))
+
+        def destinations(seed):
+            simulation = Simulation(Scenario(
+                (fun,), seed=seed, infrastructure=infrastructure, load_balancer='Random',
+            ))
+            requests = record_submissions(simulation)
+            simulation.run(arrivals=20)
+            return [request.node.id.key for request in requests]
+
+        first = destinations(42)
+        self.assertEqual(set(first), {'first', 'second'})
+        self.assertEqual(first, destinations(42))
+        self.assertNotEqual(first, destinations(43))
 
     def test_arrival_rate_scales_interarrival_times(self):
         function = profiled_function('hello', arrival_rate=2, service_rate=4, first_arrival_time=1)
@@ -283,8 +327,8 @@ class SimulationTest(unittest.TestCase):
             service = Scenario.load(path).function_registry.get('fixed').sampler.service
             self.assertEqual((service.mean, service.scv), (0.25, 0.5))
 
-    def test_configured_fifo_counts_waiting_and_retries_after_completion(self):
-        """La FIFO configurata attende un completamento e scarta quando è piena."""
+    def test_balancer_rejects_at_saturation_even_with_local_queue_enabled(self):
+        """I rifiuti del bilanciatore precedono l'ammissione locale."""
         definition = {
             'scheduler': {'queue': {'capacity': 1}},
             'functions': [{
@@ -304,27 +348,22 @@ class SimulationTest(unittest.TestCase):
         simulation.run(arrivals=3)
         engine = simulation._ctx.engine
         totals = simulation.metrics_snapshot()['total']
-        # A t=2 la prima richiesta è attiva, la seconda attende e la terza è scartata.
-        self.assertEqual((totals['arrivals'], totals['accepted'], totals['waiting'], totals['rejected']),
-                         (3, 1, 1, 1))
-        self.assertEqual(totals['pending'], 2)
-        self.assertTrue(engine.step())
-        self.assertEqual(engine.now, 2.5)
+        self.assertEqual(
+            (totals['arrivals'], totals['accepted'], totals['waiting'], totals['queued'], totals['rejected']),
+            (3, 1, 0, 0, 2),
+        )
+        self.assertEqual(totals['pending'], 1)
+        self.advance_to(engine, 2.5)
         totals = simulation.metrics_snapshot()['total']
-        # Il primo completamento libera il container e avvia la testa con warm start.
-        self.assertEqual((totals['arrivals'], totals['accepted'], totals['waiting'], totals['warm_starts']),
-                         (3, 2, 0, 1))
-        self.assertEqual(totals['mean_queue_wait_s'], 1.5)
-        # Il completamento attiva la coda sul nodo e la callback pubblica
-        # l'ammissione della richiesta arrivata a t=1.
-        at_completion = [event for event in notifications if event.to_dict()['sim_time_s'] == 2.5]
-        self.assertEqual([event.type for event in at_completion], [
-            NotificationType.REQUEST_COMPLETED, NotificationType.REQUEST_ACCEPTED,
-        ])
-        self.advance_to(engine, 5)
+        self.assertEqual((totals['accepted'], totals['completed'], totals['pending']), (1, 1, 0))
+        rejections = [event.to_dict()['data'] for event in notifications
+                      if event.type is NotificationType.REQUEST_REJECTED]
+        self.assertEqual([(event['reason'], event['node_id']) for event in rejections],
+                         [('out_of_resources', None)] * 2)
+
+        self.advance_to(engine, 3)
         totals = simulation.metrics_snapshot()['total']
-        self.assertEqual(totals['completed'], 2)
-        self.assertEqual(totals['mean_response_time_s'], 3.25)
+        self.assertEqual((totals['accepted'], totals['warm_starts']), (2, 1))
 
     def test_accepted_arrival_completes_and_releases_resources(self):
         """Riuso warm, scarti e prenotazioni confluiscono nelle metriche della replica."""
@@ -387,9 +426,11 @@ class SimulationTest(unittest.TestCase):
         self.assertEqual(totals['mean_service_time_s'], 1.5)
         resources = snapshot['nodes_by_ring']['edge']['n1']
         self.assertEqual((resources['used_cpus'], resources['warm_memory_mb']), (0, 128))
-        self.assertEqual(resources['invocations'], {key: value for key, value in totals.items() if key != 'containers'})
+        local = resources['invocations']
+        self.assertEqual((local['arrivals'], local['accepted'], local['completed'], local['rejected']), (2, 2, 2, 0))
+        self.assertEqual(local['rejections_by_reason'], {})
         self.assertEqual(resources['containers'], totals['containers'])
-        self.assertEqual(resources['by_function']['hello'], totals)
+        self.assertEqual(resources['by_function']['hello'], {**local, 'containers': totals['containers']})
         self.assertEqual(totals['response_time_variance_s2'], 0)
         cpu = resources['time_weighted_resources']['used_cpus']
         self.assertEqual(cpu['observed_time_s'], 3.5)

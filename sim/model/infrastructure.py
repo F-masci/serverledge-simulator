@@ -1,11 +1,13 @@
 """Infrastruttura organizzata in anelli omogenei identificati esplicitamente."""
 
 from collections.abc import Callable, Mapping
+from functools import partial
 from types import MappingProxyType
 
-from .load_balancer import LoadBalancer
+from .load_balancer import LoadBalancer, RandomLoadBalancer
 from .node import Node
-from .request import Request
+from .offloading import CloudLoadBalancer, NodeScheduling, OffloadingScheduler, RemoteRegion
+from .request import Request, RequestStatus
 from .ring import ArchitectureRing
 from ..utils.validation import nonempty_string
 
@@ -13,9 +15,17 @@ from ..utils.validation import nonempty_string
 class Infrastructure:
     """Raggruppa gli anelli e instrada le richieste verso i nodi."""
 
-    def __init__(self, load_balancer: LoadBalancer | None = None) -> None:
+    def __init__(
+        self, load_balancer: LoadBalancer | None = None, *,
+        offloading_cache_validity: int = 60, load_balancer_areas: tuple[str, ...] = (),
+        forward_region: Callable[[Request, str], Node | None] | None = None,
+    ) -> None:
         self._rings: dict[str, ArchitectureRing] = {}
-        self._load_balancer = LoadBalancer() if load_balancer is None else load_balancer
+        self._load_balancer = RandomLoadBalancer() if load_balancer is None else load_balancer
+        self._scheduler = OffloadingScheduler(
+            cache_validity=offloading_cache_validity, load_balancer_areas=load_balancer_areas,
+        )
+        self._forward_region = forward_region
 
         ### Callback ###
         self.on_ring_created: Callable[[Infrastructure, ArchitectureRing], None] | None = None
@@ -83,17 +93,66 @@ class Infrastructure:
             self.on_node_removed(self, ring, node)
         return node
 
-    def submit(self, request: Request) -> Node | None:
-        """Instrada la richiesta e notifica l'esito dell'inoltro."""
-        request.ensure_created()
-        ring = self._load_balancer.submit(request, self._rings.values())
-        if ring is None:
-            request.reject('no_destination')
-            node = None
-        else:
-            node = ring.submit(request)
+    def resolve_node(self, name: str, *, area: str | None = None) -> Node:
+        matches = [node for node in self._nodes() if node.id.key == name and (area is None or node.id.area == area)]
+        if len(matches) != 1:
+            raise ValueError(f'Nodo di scenario assente o ambiguo: {name}')
+        return matches[0]
 
-        # La richiesta è già accettata, in coda o rifiutata al momento della notifica.
+    def configure_scheduler(self, node: Node, settings: NodeScheduling) -> None:
+        self._scheduler.configure(node, settings)
+
+    def refresh_neighbors(self) -> None:
+        self._scheduler.refresh_neighbors(self._nodes())
+
+    def refresh_remote_targets(self) -> None:
+        self._scheduler.refresh_remote_targets(self._nodes())
+
+    def _nodes(self) -> tuple[Node, ...]:
+        return tuple(node for ring in self._rings.values() for node in ring)
+
+    def submit(
+        self, request: Request, *, now: float = 0.0, node: Node | None = None, area: str | None = None,
+    ) -> Node | None:
+        """Riceve un'invocazione al bilanciatore oppure direttamente a un nodo."""
+        request.ensure_created()
+        if node is None:
+            destination = self._route(request, now=now, area=area)
+        elif node not in self._nodes():
+            request.reject('no_destination')
+            destination = None
+        else:
+            destination = self._schedule(request, node, now=now)
+
         if self.on_request_submitted is not None:
-            self.on_request_submitted(self, request, node)
-        return node
+            self.on_request_submitted(self, request, destination)
+        return destination
+
+    def _route(self, request: Request, *, now: float, area: str | None) -> Node | None:
+        rings = self._load_balancer.candidate_rings(request, self._rings.values(), area=area)
+        schedule = partial(self._schedule, now=now)
+        for ring in rings:
+            destination = ring.submit(request, area=area, schedule=schedule)
+            if request.status is not RequestStatus.CREATED:
+                # La risposta dello scheduler arriva dopo la selezione del proxy.
+                return destination
+        request.reject('out_of_resources' if rings else 'no_destination')
+        return None
+
+    def _schedule(self, request: Request, node: Node, *, now: float) -> Node | None:
+        target = self._scheduler.schedule(request, node, now)
+        if target is None:
+            return node if request.status in (RequestStatus.ACCEPTED, RequestStatus.QUEUED) else None
+
+        request.mark_offloaded(node)
+        if isinstance(target, RemoteRegion):
+            if self._forward_region is None:
+                request.reject('no_destination')
+                return None
+            return self._forward_region(request, target.name)
+        if isinstance(target, CloudLoadBalancer):
+            return self._route(request, now=now, area=target.area)
+        if target not in self._nodes():
+            request.reject('no_destination')
+            return None
+        return self._schedule(request, target, now=now)

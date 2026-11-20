@@ -15,6 +15,7 @@ class StreamKind(IntEnum):
 
     ARRIVAL = 1
     SERVICE = 2
+    ROUTING = 3
 
 
 class RandomStreams:

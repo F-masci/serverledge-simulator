@@ -1,22 +1,25 @@
 """Metriche delle invocazioni e delle prenotazioni Serverledge."""
 
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 
 from sim.model.container import ContainerState, DockerContainer
 from sim.model.infrastructure import Infrastructure
 from sim.model.node import Node
+from sim.model.region import Region
 from sim.model.request import Request, RequestStatus
 from sim.utils.welford import TimedWelford, Welford
 
 
 @dataclass
 class _InvocationMetrics:
+    in_transit: int = 0
     waiting: int = 0
     queued: int = 0
     queue_wait: Welford = field(default_factory=Welford)
     accepted: int = 0
+    accepted_without_container: int = 0
     completed: int = 0
     cold_starts: int = 0
     warm_starts: int = 0
@@ -26,7 +29,7 @@ class _InvocationMetrics:
 
     @property
     def arrivals(self) -> int:
-        return self.waiting + self.accepted + self.rejections.total()
+        return self.in_transit + self.waiting + self.accepted + self.rejections.total()
 
     def record_submission(self, request: Request) -> None:
         if request.status is RequestStatus.QUEUED:
@@ -34,7 +37,9 @@ class _InvocationMetrics:
             self.queued += 1
         elif request.status is RequestStatus.ACCEPTED:
             self.accepted += 1
-            if request.warm:
+            if request.warm is None:
+                self.accepted_without_container += 1
+            elif request.warm:
                 self.warm_starts += 1
             else:
                 self.cold_starts += 1
@@ -52,7 +57,9 @@ class _InvocationMetrics:
             'accepted': self.accepted,
             'rejected': self.rejections.total(),
             'completed': self.completed,
-            'pending': self.waiting + self.accepted - self.completed,
+            'pending': self.in_transit + self.waiting + self.accepted - self.completed,
+            'in_transit': self.in_transit,
+            'accepted_without_container': self.accepted_without_container,
             'waiting': self.waiting,
             'queued': self.queued,
             'mean_queue_wait_s': self.queue_wait.mean,
@@ -164,6 +171,9 @@ class SimulationMetrics:
     def __init__(self) -> None:
         self._total = _InvocationMetrics()
         self._by_function: dict[str, _InvocationMetrics] = {}
+        self._by_region: dict[str, _InvocationMetrics] = {}
+        self._external_arrivals: Counter[str] = Counter()
+        self._offloads: Counter[tuple[str, str]] = Counter()
         self._by_node: dict[Node, _NodeMetrics] = {}
         self._containers: dict[tuple[Node | None, str | None], _ContainerMetrics] = {}
         self._container_functions_by_node: dict[Node, set[str]] = {}
@@ -248,6 +258,10 @@ class SimulationMetrics:
             self._by_function[name] = _InvocationMetrics()
         yield self._total
         yield self._by_function[name]
+        if request.region is not None:
+            if request.region not in self._by_region:
+                self._by_region[request.region] = _InvocationMetrics()
+            yield self._by_region[request.region]
         node = request.node
         if node is not None:
             self.observe_resources(node, now)
@@ -261,10 +275,20 @@ class SimulationMetrics:
         for stats in self._invocations_for(request, now):
             stats.record_submission(request)
 
+    def record_transfer(self, request: Request, now: float, delta: int) -> None:
+        for stats in self._invocations_for(request, now):
+            stats.in_transit += delta
+
+    def record_offload(self, source: str, destination: str) -> None:
+        self._offloads[source, destination] += 1
+
+    def record_external_arrival(self, region: str) -> None:
+        self._external_arrivals[region] += 1
+
     def record_dequeue(self, request: Request, now: float) -> None:
         for stats in self._invocations_for(request, now):
             stats.waiting -= 1
-            stats.queue_wait.add(now - request.arrival_time)
+            stats.queue_wait.add(now - request.region_arrival_time)
             stats.record_submission(request)
 
     def record_completion(self, request: Request, now: float) -> None:
@@ -273,9 +297,11 @@ class SimulationMetrics:
         for stats in self._invocations_for(request, now):
             stats.record_completion(now - request.arrival_time, service_time)
 
-    def snapshot(self, now: float, infrastructure: Infrastructure) -> dict:
+    def _nodes_snapshot(self, now: float, infrastructure: Infrastructure | None) -> dict:
         """Restituisce e separa le metriche dei nodi per ring e nome."""
         nodes_by_ring = {}
+        if infrastructure is None:
+            return nodes_by_ring
         for ring_id, ring in infrastructure.rings.items():
             nodes = {}
             for node in ring:
@@ -289,6 +315,20 @@ class SimulationMetrics:
                     function_stats['containers'] = self._container_snapshot(now, node, name)
                 nodes[node.id.key] = node_snapshot
             nodes_by_ring[ring_id] = nodes
+        return nodes_by_ring
+
+    def snapshot(self, now: float, regions: Mapping[str, Region], primary_region: str) -> dict:
+        regional = {
+            name: {
+                'mode': region.mode,
+                'external_arrivals': self._external_arrivals[name],
+                'invocations': (
+                    self._by_region[name].snapshot() if name in self._by_region else _InvocationMetrics().snapshot()
+                ),
+                'nodes_by_ring': self._nodes_snapshot(now, region.infrastructure),
+            }
+            for name, region in regions.items()
+        }
         return {
             'time_s': now,
             'total': {**self._total.snapshot(), 'containers': self._container_snapshot(now)},
@@ -299,5 +339,11 @@ class SimulationMetrics:
                 }
                 for name in sorted(self._by_function.keys() | self._container_functions)
             },
-            'nodes_by_ring': nodes_by_ring,
+            'primary_region': primary_region,
+            'nodes_by_ring': regional[primary_region]['nodes_by_ring'],
+            'regions': regional,
+            'regional_offloads': [
+                {'source': source, 'destination': destination, 'count': count}
+                for (source, destination), count in sorted(self._offloads.items())
+            ],
         }

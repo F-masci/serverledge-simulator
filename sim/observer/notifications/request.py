@@ -1,6 +1,6 @@
 """Notifiche di arrivo, rifiuto e completamento delle richieste."""
 from abc import ABC
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from logging import INFO
 
 from .notification import Notification, NotificationType
@@ -12,6 +12,7 @@ class _RequestNotification(Notification, ABC):
     sim_time_s: float
     request_id: str
     function: str
+    region: str | None = field(default=None, kw_only=True)
 
     def __str__(self) -> str:
         data = self.to_dict()['data']
@@ -38,12 +39,12 @@ class RequestArrived(_RequestNotification):
 
 @dataclass(frozen=True)
 class RequestAccepted(_RequestNotification):
-    """La richiesta è stata ammessa dal nodo indicato."""
+    """La richiesta è stata ammessa nella regione indicata."""
 
     type = NotificationType.REQUEST_ACCEPTED
     level = INFO
 
-    node_id: str
+    node_id: str | None
 
 
 @dataclass(frozen=True)
@@ -59,11 +60,11 @@ class RequestRejected(_RequestNotification):
 
 @dataclass(frozen=True)
 class RequestCompleted(_RequestNotification):
-    """L'invocazione è terminata sul nodo assegnato."""
+    """La risposta dell'invocazione è stata consegnata."""
 
     type = NotificationType.REQUEST_COMPLETED
     level = INFO
 
-    node_id: str
-    container_id: str
+    node_id: str | None
+    container_id: str | None
     response_time_s: float

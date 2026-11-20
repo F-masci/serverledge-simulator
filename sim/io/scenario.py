@@ -10,11 +10,12 @@ from types import MappingProxyType
 from typing import TextIO
 
 from sim.model.function import BuiltinRuntime, CustomRuntime, Function, FunctionProfile, Runtime
+from sim.model.load_balancer import LoadBalancerMode
 from sim.random.streams import RandomStreams
-from sim.utils.validation import nonnegative_integer
+from sim.utils.validation import nonempty_string, nonnegative_integer
 
 from ._scenario_config import (
-    _ContainersConfig, _FunctionConfig, _InfrastructureConfig, _SchedulerConfig,
+    _ContainersConfig, _FunctionConfig, _InfrastructureConfig, _InvocationConfig, _RegionConfig, _SchedulerConfig,
 )
 
 
@@ -25,7 +26,10 @@ class Scenario:
     function_registry: Mapping[str, Function] = field(init=False, repr=False)
     scheduler: _SchedulerConfig
     containers: _ContainersConfig
-    infrastructure: _InfrastructureConfig
+    regions: Mapping[str, _RegionConfig]
+    primary_region: str
+    invocation: _InvocationConfig
+    load_balancer: LoadBalancerMode
     seed: int = 12345
 
     def __init__(
@@ -34,22 +38,77 @@ class Scenario:
         *, infrastructure: Mapping[str, object] | None = None,
         containers: Mapping[str, object] | None = None,
         scheduler: Mapping[str, object] | None = None,
+        load_balancer: str = LoadBalancerMode.RANDOM,
+        invocation: Mapping[str, object] | None = None,
+        regions: Mapping[str, object] | None = None,
+        primary_region: str | None = None,
     ) -> None:
         """Valida le sezioni dello scenario e registra le funzioni."""
 
         # Il seed e i profili dei container servono alla registrazione delle funzioni.
         seed = nonnegative_integer(seed, 'seed')
         object.__setattr__(self, 'seed', seed)
+        try:
+            mode = LoadBalancerMode(load_balancer)
+        except ValueError as error:
+            modes = ', '.join(LoadBalancerMode)
+            raise ValueError(f'load_balancer deve essere uno tra {modes}') from error
+        object.__setattr__(self, 'load_balancer', mode)
         scheduler_config = _SchedulerConfig.parse(scheduler)
         object.__setattr__(self, 'scheduler', scheduler_config)
         containers_config = _ContainersConfig.parse(containers)
         object.__setattr__(self, 'containers', containers_config)
-        infrastructure_config = _InfrastructureConfig.parse(infrastructure)
-        object.__setattr__(self, 'infrastructure', infrastructure_config)
+        self._configure_regions(regions, primary_region, infrastructure, _InvocationConfig.parse(invocation))
 
         # Espone il registro in sola lettura e conserva la topologia dichiarata.
         registry = self._register_functions(functions)
         object.__setattr__(self, 'function_registry', MappingProxyType(registry))
+
+    @property
+    def infrastructure(self) -> _InfrastructureConfig | None:
+        return self.regions[self.primary_region].infrastructure
+
+    def _configure_regions(
+        self, regions: Mapping[str, object] | None, primary_region: str | None,
+        infrastructure: Mapping[str, object] | None, invocation: _InvocationConfig,
+    ) -> None:
+        if primary_region is not None:
+            primary_region = nonempty_string(primary_region, 'primary_region')
+        if regions is None:
+            primary = primary_region or 'default'
+            configured = {primary: _RegionConfig(_InfrastructureConfig.parse(infrastructure))}
+        else:
+            if infrastructure is not None:
+                raise ValueError('Con regions, dichiarare infrastructure dentro ogni regione')
+            if not isinstance(regions, Mapping) or not regions:
+                raise ValueError('regions deve essere una tabella di regioni non vuota')
+            configured = {
+                nonempty_string(name, 'regions (nome)'): _RegionConfig.parse(name, data)
+                for name, data in regions.items()
+            }
+            primary = primary_region or next(iter(configured))
+        if primary not in configured:
+            raise ValueError(f'primary_region sconosciuta: {primary}')
+
+        entry = invocation.entry_region or primary
+        if entry not in configured:
+            raise ValueError(f'invocation.entry_region sconosciuta: {entry}')
+        if configured[entry].infrastructure is None and (invocation.entry_node or invocation.entry_area):
+            raise ValueError(f'La regione {entry} accetta invocazioni a livello di regione')
+
+        for name, region in configured.items():
+            for source in region.offload_latency_by_source_s:
+                if source not in configured or source == name:
+                    raise ValueError(f'regions.{name}.offload_latency_by_source_s richiede un’altra regione censita: {source}')
+            if region.infrastructure is None:
+                continue
+            for ring in region.infrastructure.rings:
+                for node in ring.nodes:
+                    if node.remote_region is not None and (node.remote_region not in configured or node.remote_region == name):
+                        raise ValueError(f'node.remote_region deve indicare un’altra regione censita: {node.remote_region}')
+        object.__setattr__(self, 'primary_region', primary)
+        object.__setattr__(self, 'regions', MappingProxyType(configured))
+        object.__setattr__(self, 'invocation', invocation)
 
     def _register_functions(
         self, definitions: Iterable[Function | Mapping[str, object]],
@@ -122,7 +181,9 @@ class Scenario:
         # Controlla le sezioni ammesse prima di validarne il contenuto.
         if not isinstance(data, dict):
             raise ValueError('Lo scenario deve essere una tabella')
-        if unknown := data.keys() - {'functions', 'function', 'seed', 'infrastructure', 'containers', 'scheduler'}:
+        allowed = {'functions', 'function', 'seed', 'infrastructure', 'containers', 'scheduler',
+                   'load_balancer', 'invocation', 'regions', 'primary_region'}
+        if unknown := data.keys() - allowed:
             raise ValueError(f'Parametri scenario sconosciuti: {sorted(map(str, unknown))}')
 
         # Normalizza la forma a funzione singola nella lista usata dal costruttore.
@@ -138,6 +199,10 @@ class Scenario:
             infrastructure=data.get('infrastructure'),
             containers=data.get('containers'),
             scheduler=data.get('scheduler'),
+            load_balancer=data.get('load_balancer', LoadBalancerMode.RANDOM),
+            invocation=data.get('invocation'),
+            regions=data.get('regions'),
+            primary_region=data.get('primary_region'),
         )
 
     @staticmethod

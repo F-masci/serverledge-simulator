@@ -279,8 +279,9 @@ class Node:
         """Tenta l'ammissione locale dopo la selezione di un ring compatibile.
 
         Riusa un busy sotto il limite di concorrenza, poi un idle, oppure
-        prenota una nuova creazione. Il ring può rinviare il rifiuto definitivo
-        per provare altri nodi. Una creazione resta CREATING fino
+        prenota una nuova creazione. Durante il routing, un tentativo fallito
+        lascia la richiesta disponibile per il candidato successivo.
+        Una creazione resta CREATING fino
         alla notifica esplicita del suo esito, senza esecuzione automatica.
         """
         request.ensure_created()

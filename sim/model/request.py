@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from .function import Function
-from ..utils.ensure import ensure_node, ensure_container
+from ..utils.ensure import ensure_container
 
 if TYPE_CHECKING:
     from .container import DockerContainer
@@ -17,9 +17,11 @@ if TYPE_CHECKING:
 class RequestStatus(Enum):
     """Stati di una richiesta durante ammissione ed esecuzione."""
     CREATED = 'created'
+    IN_TRANSIT = 'in_transit'
     QUEUED = 'queued'
     ACCEPTED = 'accepted'
     REJECTED = 'rejected'
+    RESPONDING = 'responding'
     COMPLETED = 'completed'
 
 
@@ -28,6 +30,7 @@ class Request:
 
     def __init__(
         self, function: Function, *, service_duration: float | None = None, arrival_time: float = 0.0,
+        can_offload: bool = False,
     ) -> None:
         self._id = uuid4().hex
         self._function = function
@@ -38,6 +41,12 @@ class Request:
         self._container = None
         self._warm = None
         self._rejection_reason = None
+        self._allow_offloading = can_offload
+        self._offloaded_from: Node | None = None
+        self._entry_region: str | None = None
+        self._region: str | None = None
+        self._region_arrival_time = arrival_time
+        self._return_delay = 0.0
 
         ### Callback ###
         self.on_queued: Callable[[Request], None] | None = None
@@ -84,6 +93,52 @@ class Request:
     def rejection_reason(self) -> str | None:
         return self._rejection_reason
 
+    @property
+    def can_offload(self) -> bool:
+        return self._allow_offloading and self._offloaded_from is None
+
+    @property
+    def offloaded_from(self) -> 'Node | None':
+        return self._offloaded_from
+
+    @property
+    def entry_region(self) -> str | None:
+        return self._entry_region
+
+    @property
+    def region(self) -> str | None:
+        return self._region
+
+    @property
+    def region_arrival_time(self) -> float:
+        return self._region_arrival_time
+
+    @property
+    def return_delay(self) -> float:
+        return self._return_delay
+
+    def enter_region(self, region: str, now: float) -> None:
+        if self.status is not RequestStatus.IN_TRANSIT:
+            self.ensure_created()
+        self._region = region
+        if self._entry_region is None:
+            self._entry_region = region
+        self._region_arrival_time = now
+        if self.status is RequestStatus.IN_TRANSIT:
+            self._handle_change_status(RequestStatus.CREATED, None)
+
+    def start_transfer(self, region: str, return_delay: float) -> None:
+        self.ensure_created()
+        self._region = region
+        self._return_delay = return_delay
+        self._handle_change_status(RequestStatus.IN_TRANSIT, None)
+
+    def mark_offloaded(self, source: 'Node') -> None:
+        self.ensure_created()
+        if not self.can_offload:
+            raise ValueError('Offloading non consentito per questa richiesta')
+        self._offloaded_from = source
+
     def ensure_created(self) -> None:
         """Controlla che la richiesta sia ancora in attesa di ammissione."""
         if self.status is not RequestStatus.CREATED:
@@ -117,16 +172,32 @@ class Request:
         self._rejection_reason = reason
         self._handle_change_status(RequestStatus.REJECTED, self.on_rejected)
 
+    def accept_without_container(self, service_time: float) -> None:
+        self.ensure_created()
+        self._service_duration = service_time
+        self._handle_change_status(RequestStatus.ACCEPTED, self.on_accepted)
+
     def complete(self, now: float) -> None:
-        """Conclude l'invocazione e aggiorna il container sul nodo assegnato."""
-        node = ensure_node(self)
-        container = ensure_container(self)
+        """Conclude un'invocazione con risposta immediata."""
+        self._release_execution(now)
+        self._handle_change_status(RequestStatus.COMPLETED, self.on_completed)
+
+    def begin_response(self, now: float) -> None:
+        """Libera il container prima del rientro della risposta."""
+        self._release_execution(now)
+        self._handle_change_status(RequestStatus.RESPONDING, None)
+
+    def finish_response(self) -> None:
+        if self.status is not RequestStatus.RESPONDING:
+            raise ValueError('La richiesta non ha una risposta in transito')
+        self._handle_change_status(RequestStatus.COMPLETED, self.on_completed)
+
+    def _release_execution(self, now: float) -> None:
         if self.status is not RequestStatus.ACCEPTED:
             raise ValueError('Solo una richiesta accettata può essere completata')
 
-        # Il nodo libera le risorse e prova ad avviare le richieste in FIFO.
-        node.complete(container, now)
-        self._handle_change_status(RequestStatus.COMPLETED, self.on_completed)
+        if self.node is not None:
+            self.node.complete(ensure_container(self), now)
 
     def _handle_change_status(self, status: RequestStatus, callback: Callable[[Request], None] | None) -> None:
         """Aggiorna lo stato prima di invocare i callback."""
@@ -148,8 +219,8 @@ class Request:
 
     def to_dict(self) -> dict:
         """Restituisce lo stato della richiesta con i riferimenti espressi come ID."""
-        node = ensure_node(self)
-        container = ensure_container(self)
+        node = self.node
+        container = self.container
         return {
             'id': self.id,
             'function': self.function.name,
@@ -160,6 +231,9 @@ class Request:
             'container_id': container.id if container is not None else None,
             'warm': self.warm,
             'rejection_reason': self.rejection_reason,
+            'entry_region': self.entry_region,
+            'region': self.region,
+            'offloaded_from_node_id': self.offloaded_from.id.key if self.offloaded_from is not None else None,
         }
 
     def to_json(self) -> str:

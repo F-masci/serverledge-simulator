@@ -2,14 +2,16 @@
 
 Riferimenti Infrascaler: internal/lb/hashRing.go, hash, HashRing.Add e
 HashRing.Get per l'ordine delle repliche virtuali e la ricerca di altri nodi;
-internal/lb/generalLoadBalancer.go per il filtro di compatibilità.
-Il simulatore usa l'ammissione locale per provare i candidati del ring scelto.
-Infrascaler preseleziona i nodi tramite metriche e può ripiegare su altri pool.
+internal/lb/generalLoadBalancer.go per il filtro di compatibilità e il fallback.
 """
 
+from dataclasses import replace
 import unittest
 
 from sim.model.infrastructure import Infrastructure
+from sim.model.load_balancer import (
+    ArchitectureUnawareLoadBalancer, MABLoadBalancer, RandomLoadBalancer, RoundRobinLoadBalancer,
+)
 from sim.model.request import Request, RequestStatus
 from sim.model.function import Function, BuiltinRuntime
 
@@ -19,6 +21,97 @@ def function(name='hello', archs=('amd64', 'arm64')):
 
 
 class RoutingTest(unittest.TestCase):
+    def test_random_balancer_draws_only_compatible_rings_with_reproducible_seed(self):
+        infra = Infrastructure()
+        for ring_id, arch, tag in (
+            ('empty', 'amd64', None),
+            ('plain', 'amd64', 'x86/tiny'),
+            ('wrong-arch', 'arm64', 'arm/gpu/nvidia'),
+            ('first', 'amd64', 'x86-large/gpu/nvidia'),
+            ('second', 'amd64', 'x86-tiny/gpu/nvidia'),
+        ):
+            infra.create_ring(ring_id, arch=arch, memory=512, cpus=2)
+            if tag is not None:
+                infra.create_node(ring_id, ring_id, 'edge', tag)
+        constrained = replace(function(archs=('amd64',)), tag_pattern='GPU, nvidia')
+
+        def draws(seed):
+            balancer = RandomLoadBalancer(seed=seed)
+            return [
+                balancer.submit(Request(constrained), infra.rings.values()).id
+                for _ in range(32)
+            ]
+
+        baseline = draws(42)
+        self.assertEqual(set(baseline), {'first', 'second'})
+        self.assertEqual(baseline, draws(42))
+        self.assertNotEqual(baseline, draws(43))
+
+    def test_machine_tag_requirements_match_reference_patterns(self):
+        tag = 'x86-large/gpu/nvidia'
+        for pattern, expected in (
+            ('', True), ('x86', True), ('large', True), ('x86-large/gpu', True),
+            ('*/gpu/nvidia', True), ('^x86-.*/gpu.*$', True),
+            ('gpu, amd', False), ('x86-tiny/gpu', False), ('^[', False),
+        ):
+            with self.subTest(pattern=pattern):
+                self.assertEqual(replace(function(), tag_pattern=pattern).supports_machine_tag(tag), expected)
+
+    def test_fallback_uses_registration_order_and_rejects_after_saturation(self):
+        seed = 42
+        infra = Infrastructure(RandomLoadBalancer(seed=seed))
+        nodes = {}
+        for ring_id in ('gpu-first', 'gpu-second', 'gpu-third', 'plain'):
+            infra.create_ring(ring_id, arch='amd64', memory=128, cpus=1)
+            nodes[ring_id] = infra.create_node(
+                ring_id, ring_id, 'edge', f'x86/{ring_id}', queue_capacity=1,
+            )
+
+        fun = replace(function(), tag_pattern='x86/gpu-*')
+        requests = (Request(fun), Request(fun))
+        predictor = RandomLoadBalancer(seed=seed)
+        order = predictor.candidate_rings(requests[0], infra.rings.values())
+        primary, fallback, last = (nodes[ring.id] for ring in order)
+        fallback_order = [ring_id for ring_id in nodes if ring_id not in (order[0].id, 'plain')]
+        self.assertEqual([ring.id for ring in order[1:]], fallback_order)
+        self.assertTrue(primary.submit(Request(fun)))
+
+        self.assertIs(infra.submit(requests[0]), fallback)
+        self.assertIs(requests[0].status, RequestStatus.ACCEPTED)
+        self.assertTrue(last.submit(Request(fun)))
+
+        rejected = requests[1]
+        self.assertIsNone(infra.submit(rejected))
+        self.assertIs(rejected.status, RequestStatus.REJECTED)
+        self.assertEqual(rejected.rejection_reason, 'out_of_resources')
+        payload = rejected.to_dict()
+        self.assertIsNone(payload['node_id'])
+        self.assertIsNone(payload['container_id'])
+        self.assertEqual(nodes['plain'].resources.used_cpus, 0)
+
+    def test_ring_with_mixed_node_tags_only_admits_compatible_nodes(self):
+        infra = Infrastructure()
+        ring = infra.create_ring('r', arch='amd64', memory=512, cpus=2)
+        regular = infra.create_node('r', 'one', 'edge')
+        gpu = infra.create_node('r', 'three', 'edge', 'x86/gpu')
+        self.assertIs(ring.select_node(function()), regular)
+
+        constrained = replace(function(), tag_pattern='gpu')
+        self.assertIs(infra.submit(Request(constrained)), gpu)
+        rejected = Request(replace(function(), tag_pattern='arm*'))
+        self.assertIsNone(infra.submit(rejected))
+        self.assertEqual(rejected.rejection_reason, 'no_destination')
+        self.assertEqual(regular.resources.used_cpus, 0)
+
+    def test_unavailable_balancers_fail_on_instantiation(self):
+        for balancer, mode in (
+            (MABLoadBalancer, 'MAB'),
+            (RoundRobinLoadBalancer, 'RoundRobin'),
+            (ArchitectureUnawareLoadBalancer, 'ArchitectureUnaware'),
+        ):
+            with self.subTest(mode=mode), self.assertRaisesRegex(NotImplementedError, mode):
+                balancer()
+
     def test_empty_and_incompatible_rings_are_skipped(self):
         """Non si inoltra a ring vuoti o non compatibili; senza destinazione restituisce None."""
         infra = Infrastructure()
@@ -61,7 +154,7 @@ class RoutingTest(unittest.TestCase):
 
         rejected = Request(function())
         self.assertIsNone(infra.submit(rejected))
-        self.assertIs(rejected.node, nodes['one'])
+        self.assertIsNone(rejected.node)
         self.assertIs(rejected.status, RequestStatus.REJECTED)
         self.assertEqual(rejected.rejection_reason, 'out_of_resources')
 
