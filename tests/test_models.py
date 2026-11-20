@@ -65,13 +65,13 @@ class ModelsTest(unittest.TestCase):
         # La prima conclusione lascia una richiesta attiva e il container busy.
         self.node.complete(c, 1)
         self.assertEqual(c.state, ContainerState.BUSY)
-        self.node.complete(c, 2, timeout=10)
+        self.node.complete(c, 2)
         self.assertEqual(self.node.resources.used_cpus, 0)
         self.assertEqual(self.node.resources.warm_pool_used_mem, 128)
-        # Ultimo completamento a t=2, timeout=10: confronto stretto now > 12.
-        self.node.expire(12)
+        # Ultimo completamento a t=2 e timeout predefinito di 600 secondi.
+        self.node.expire(602, container=c)
         self.assertEqual(c.state, ContainerState.IDLE)
-        self.node.expire(13)
+        self.node.expire(603, container=c)
         self.assertEqual(c.state, ContainerState.DESTROYED)
         self.assertEqual(self.node.resources.free_memory, 512)
 
@@ -90,30 +90,14 @@ class ModelsTest(unittest.TestCase):
         resources = self.node.resources
         before = (resources.used_cpus, resources.busy_pool_used_mem, resources.warm_pool_used_mem)
 
-        self.assertIsNone(self.node.acquire(f, only_warm=True))
+        self.assertIsNone(self.node.acquire(f))
         self.assertEqual(pool.idle, (a, b))
         self.assertEqual((resources.used_cpus, resources.busy_pool_used_mem, resources.warm_pool_used_mem), before)
 
-        self.node.creation_failed(pending)
-        self.assertIs(self.node.acquire(f, only_warm=True), b)
-        self.assertIs(self.node.acquire(f, only_warm=True), a)
-
-    def test_failed_creation_rolls_back_both_buckets(self):
-        """Verifica il rollback di una creazione fallita normale o prewarm.
-
-        Una creazione normale prenota RAM busy e CPU; una prewarm prenota RAM
-        warm. In entrambi i casi il fallimento deve restituire tutta la RAM e
-        lasciare zero CPU prenotate. DESTROYED indica un oggetto simulato non
-        più utilizzabile: non attesta la pulizia di oggetti Docker parziali.
-        """
-        # Stessa verifica sui due diversi bucket di prenotazione RAM.
-        for prewarm in (False, True):
-            with self.subTest(prewarm=prewarm):
-                c = self.node.prewarm(function()) if prewarm else self.node.acquire(function())
-                self.node.creation_failed(c)
-                self.assertEqual(c.state, ContainerState.DESTROYED)
-                self.assertEqual(self.node.resources.free_memory, 512)
-                self.assertEqual(self.node.resources.used_cpus, 0)
+        self.node.creation_succeeded(pending, 2)
+        self.node.complete(pending, 3)
+        self.assertIs(self.node.acquire(f), b)
+        self.assertIs(self.node.acquire(f), a)
 
     def test_prewarm_eviction_and_limits(self):
         """Verifica prewarming, recupero RAM warm e traduzione dei limiti Docker.

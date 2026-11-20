@@ -79,7 +79,7 @@ class Resources:
     def available_cpus(self) -> float:
         return self.total_cpus - self.used_cpus
 
-    def _reserve(self, function: Function, *, idle: bool) -> None:
+    def reserve(self, function: Function, *, idle: bool) -> None:
         if idle:
             self._warm_pool_used_mem += function.memory_mb
         else:
@@ -95,11 +95,11 @@ class Resources:
 
     def activate(self, function: Function) -> None:
         self._release(function, idle=True)
-        self._reserve(function, idle=False)
+        self.reserve(function, idle=False)
 
     def deactivate(self, function: Function) -> None:
         self._release(function, idle=False)
-        self._reserve(function, idle=True)
+        self.reserve(function, idle=True)
 
 
 class Node:
@@ -201,10 +201,10 @@ class Node:
 
     ## Container selection ##
 
-    def acquire(self, function: Function, *, only_warm: bool = False) -> DockerContainer | None:
+    def acquire(self, function: Function) -> DockerContainer | None:
         """Riusa un container o riserva una creazione; None indica indisponibilità.
 
-        Una creazione deve essere conclusa con creation_succeeded/creation_failed.
+        Una creazione viene conclusa con creation_succeeded.
         """
         pool = self._get_pool(function)
 
@@ -212,11 +212,9 @@ class Node:
         # che non abbia raggiunto la concorrenza massima.
         container = pool.get_reusable_container()
 
-        # Se non c'è un container riutilizzabile,
-        # si tenta di crearne uno nuovo,
-        # a meno che only_warm sia True.
+        # Se non c'è un container riutilizzabile, si tenta di crearne uno nuovo.
         if container is None:
-            return None if only_warm else self._reserve_creation(function, idle=False)
+            return self._reserve_creation(function, idle=False)
 
         # Se il container è busy, lo si riutilizza senza modificare le prenotazioni.
         if container.is_busy:
@@ -243,62 +241,80 @@ class Node:
         return None
 
     def prewarm(self, function: Function) -> DockerContainer | None:
-        """Riserva un container destinato al pool idle.
-
-        """
+        """Riserva un container destinato al pool idle."""
         self._get_pool(function)
         return self._reserve_creation(function, idle=True)
 
     def _reserve_creation(self, function: Function, *, idle: bool) -> DockerContainer | None:
-        if (self.resources.available_cpus < function.cpu_demand
-                or self.resources.available_memory < function.memory_mb):
-            return None
+        """
+        Riserva la creazione di un nuovo container, se le risorse lo consentono
+
+        Se idle è True, il container sarà destinato al pool idle; altrimenti sarà destinato a un uso immediato.
+        Restituisce il container riservato o None se le risorse non sono sufficienti.
+        Viene effettuata una verifica delle risorse disponibili e, se necessario, vengono distrutti
+        container idle per liberare memoria.
+        """
+        if self.resources.available_cpus < function.cpu_demand: return None
+        if self.resources.available_memory < function.memory_mb: return None
+
+        # Se non ci sono abbastanza risorse disponibili, si cerca di liberare memoria.
         deficit = function.memory_mb - self.resources.free_memory
-        if deficit > 0:
-            # Ordine deterministico del simulatore; la mappa Go non garantisce ordine.
-            candidates = []
-            reclaimed = 0
-            for pool in self._pools.values():
-                for container in pool.idle:
-                    candidates.append(container)
-                    reclaimed += container.function.memory_mb
-                    if reclaimed >= deficit:
-                        break
-                if reclaimed >= deficit:
-                    break
-            if reclaimed < deficit:
-                return None
-            for container in candidates:
-                self._destroy_idle(container)
-        self.resources._reserve(function, idle=idle)
+        if deficit > 0 and self._free_memory(deficit) < deficit:
+            # Se non è possibile liberare abbastanza memoria, la creazione non può essere riservata.
+            return None
+
+        # Se le risorse sono sufficienti, si riserva la creazione del container e si aggiorna lo stato.
+        self.resources.reserve(function, idle=idle)
         container = DockerContainer(f'{self.id.key}/c{next(self._container_ids)}', function, node=self)
         self._pending[container] = idle
         self._notify_container_state(container, None)
         return container
 
-    def creation_succeeded(self, container: DockerContainer, now: float, timeout: float | None = None) -> None:
+    def _free_memory(self, to_free: int) -> int:
+        """Libera la memoria richiesta o restituisce zero se gli idle non bastano."""
+        if to_free <= 0:
+            return 0
+
+        candidates = []
+        reclaimable = 0
+
+        # Raccoglie i candidati nell'ordine dei pool e delle rispettive liste idle.
+        for pool in self._pools.values():
+            for container in pool.idle:
+                candidates.append(container)
+                reclaimable += container.function.memory_mb
+                if reclaimable >= to_free:
+                    break
+            if reclaimable >= to_free:
+                break
+
+        # Conserva tutti i container warm se il loro rilascio non copre il deficit.
+        if reclaimable < to_free:
+            return 0
+
+        # Rimuove i candidati e aggiorna le prenotazioni del nodo.
+        for container in candidates:
+            self._destroy_idle(container)
+
+        return reclaimable
+
+    def creation_succeeded(self, container: DockerContainer, now: float) -> None:
         idle = self._pending.pop(container)
-        container.created(idle=idle, now=now, timeout=self._idle_timeout if timeout is None else timeout)
+        container.created(idle=idle, now=now, timeout=self._idle_timeout)
         self._get_pool(container.function).add(container)
         self._notify_container_state(container, ContainerState.CREATING)
         if idle:
             self._notify_container_idle(container)
 
-    def creation_failed(self, container: DockerContainer) -> None:
-        idle = self._pending.pop(container)
-        self.resources._release(container.function, idle=idle)
-        container.destroy()
-        self._notify_container_state(container, ContainerState.CREATING)
-
-    def complete(self, container: DockerContainer, now: float, timeout: float | None = None) -> None:
+    def complete(self, container: DockerContainer, now: float) -> None:
         pool = self._pools.get(container.function.name)
         if pool is None or container not in pool.busy:
             raise ValueError('Container non attivo su questo nodo')
-        container.complete(now, self._idle_timeout if timeout is None else timeout)
+        container.complete(now, self._idle_timeout)
         if container.state is ContainerState.IDLE:
             pool.remove_busy(container)
             pool.add(container)
-            self.resources._deactivate(container.function)
+            self.resources.deactivate(container.function)
             self._notify_container_state(container, ContainerState.BUSY)
             self._notify_container_idle(container)
         self.dispatch_waiting()
@@ -318,22 +334,11 @@ class Node:
         self.resources._release(container.function, idle=True)
         self._notify_container_state(container, ContainerState.IDLE)
 
-    def expire(self, now: float, *, container: DockerContainer | None = None) -> None:
-        """Un passaggio del janitor, da invocare ai tempi stabiliti dal motore.
-
-        La distruzione Docker è assunta riuscita in questo modello iniziale.
-        """
-        if container is not None:
-            pool = self._pools.get(container.function.name)
-            if pool is not None and container.is_expired(now) and container in pool.idle:
-                self._destroy_idle(container)
-            return
-
-        for pool in self._pools.values():
-            for container in pool.remove_expired(now):
-                container.destroy()
-                self.resources._release(container.function, idle=True)
-                self._notify_container_state(container, ContainerState.IDLE)
+    def expire(self, now: float, *, container: DockerContainer) -> None:
+        """Rimuove il container indicato se è ancora nel pool idle ed è scaduto."""
+        pool = self._pools.get(container.function.name)
+        if pool is not None and container.is_expired(now) and container in pool.idle:
+            self._destroy_idle(container)
 
     def submit(self, request: Request, *, reject_on_failure: bool = True) -> bool:
         """Tenta l'ammissione locale dopo la selezione di un ring compatibile.
