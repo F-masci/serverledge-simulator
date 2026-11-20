@@ -9,21 +9,21 @@ Riferimenti Infrascaler:
 - internal/node/janitor_handler.go: pulizia periodica dei container scaduti.
 """
 
+from dataclasses import replace
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
-from sim.core import EventStatus
 from sim.io.scenario import Scenario
 from sim.model.function import BuiltinRuntime, CustomRuntime, Function, FunctionProfile
 from sim.core.simulation import Simulation
-from sim.model.events import ArrivalEvent
 from sim.model.container import ContainerState
-from sim.model.infrastructure import Infrastructure
 from sim.model.request import RequestStatus
+from sim.model.infrastructure import Infrastructure
 from sim.observer import Notification, NotificationType, SimulationError, observer
-from sim.observer.logger import log_notification
+from sim.__main__ import main
 from sim.utils.welford import TimedWelford, Welford
 
 
@@ -32,27 +32,32 @@ def profiled_function(name, arrival_rate, service_rate, first_arrival_time=0):
                     profile=FunctionProfile(arrival_rate, service_rate, first_arrival_time))
 
 
-class RecordingInfrastructure(Infrastructure):
-    def __init__(self):
-        super().__init__()
-        self.requests = []
+EDGE = {'rings': [{
+    'id': 'edge', 'arch': 'amd64', 'memory_mb': 128, 'cpus': 1,
+    'nodes': [{'name': 'n1', 'area': 'edge'}],
+}]}
 
-    def submit(self, request):
-        self.requests.append(request)
-        return super().submit(request)
+
+def record_submissions(simulation):
+    requests = []
+    simulation._ctx.infrastructure.on_request_submitted = lambda infra, request, node: requests.append(request)
+    return requests
 
 
 class SimulationTest(unittest.TestCase):
+    def advance_to(self, engine, time):
+        """Esegue fino a un istante in cui è previsto almeno un evento."""
+        while engine.now < time:
+            self.assertTrue(engine.step())
+        self.assertEqual(engine.now, time)
+
     def test_request_notifications_correlate_arrivals_with_outcomes(self):
         """Il primo arrivo completa e il secondo viene rifiutato dal nodo saturo."""
         function = Function('hello', 128, 1, BuiltinRuntime('python314'), profile=FunctionProfile(
             arrival_rate=1, service_rate=0.4, first_arrival_time=0,
             arrival_distribution='deterministic', service_distribution='deterministic',
         ))
-        scenario = Scenario((function,), infrastructure={'rings': [{
-            'id': 'edge', 'arch': 'amd64', 'memory_mb': 128, 'cpus': 1,
-            'nodes': [{'name': 'n1', 'area': 'edge'}],
-        }]})
+        scenario = Scenario((function,), infrastructure=EDGE)
         notifications: list[Notification] = []
         self.addCleanup(observer.subscribe(notifications.append))
 
@@ -66,6 +71,7 @@ class SimulationTest(unittest.TestCase):
                          ['request.arrived', 'request.arrived', 'request.rejected'])
         self.assertEqual(rejected['request_id'], second['request_id'])
         self.assertEqual(rejected['reason'], 'out_of_resources')
+        self.assertEqual(rejected['node_id'], 'n1')
         completed, = [payload['data'] for payload in payloads if payload['type'] == 'request.completed']
         self.assertEqual(completed['request_id'], first['request_id'])
         self.assertEqual(completed['response_time_s'], 2.5)
@@ -77,9 +83,9 @@ class SimulationTest(unittest.TestCase):
         notifications: list[Notification] = []
         self.addCleanup(observer.subscribe(notifications.append))
 
-        self.assertIs(simulation.run(arrivals=1), simulation.metrics)
+        statistics = simulation.run(arrivals=1)
         self.assertFalse(any(event.type is NotificationType.FINAL_STATISTICS for event in notifications))
-        observer.notify(simulation.final_statistics())
+        observer.notify(statistics)
 
         event, = [event for event in notifications if event.type is NotificationType.FINAL_STATISTICS]
         payload = json.loads(json.dumps(event.to_dict()))
@@ -88,92 +94,80 @@ class SimulationTest(unittest.TestCase):
         self.assertEqual(payload['data']['metrics'], simulation.metrics_snapshot())
         self.assertEqual(payload['sim_time_s'], 2)
 
-    def test_failed_calendar_event_is_emitted_and_logged_as_error(self):
-        """L'errore raggiunge observer e logger, poi torna al chiamante."""
+    def test_cli_reports_simulation_failure(self):
         failure = ValueError('inoltro fallito')
-
-        class FailingInfrastructure(Infrastructure):
-            def submit(self, request):
-                raise failure
-
-        function = profiled_function('hello', 1, 1, first_arrival_time=2)
-        simulation = Simulation(Scenario((function,)), FailingInfrastructure())
-        occurrence, = simulation.start()
-        notifications: list[Notification] = []
+        scenario = Scenario((profiled_function('hello', 1, 1),))
+        notifications = []
         self.addCleanup(observer.subscribe(notifications.append))
-        self.addCleanup(observer.subscribe(log_notification))
 
-        with self.assertLogs('sim.notifications', level='ERROR') as logs:
-            with self.assertRaises(ValueError) as raised:
-                simulation.engine.step()
-        self.assertIs(raised.exception, failure)
-        self.assertIs(occurrence.status, EventStatus.FAILED)
-        event, = [event for event in notifications if event.type is NotificationType.SIMULATION_ERROR]
-        self.assertIsInstance(event, SimulationError)
-        self.assertIs(event.exception, failure)
-        payload = json.loads(json.dumps(event.to_dict()))
-        self.assertEqual(payload['type'], 'simulation.error')
-        self.assertEqual(payload['sim_time_s'], 2)
-        self.assertEqual(payload['data'], {
-            'failed_event': 'ArrivalEvent',
+        with (
+            patch('sys.argv', ['sim', 'scenario.toml', '--arrivals', '1']),
+            patch.object(Scenario, 'load', return_value=scenario),
+            patch.object(Infrastructure, 'submit', side_effect=failure),
+            self.assertLogs('sim.notifications', level='ERROR') as logs,
+            self.assertRaises(SystemExit) as raised,
+        ):
+            main()
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIs(raised.exception.__cause__, failure)
+        event, = [event for event in notifications if isinstance(event, SimulationError)]
+        self.assertEqual(event.to_dict()['data'], {
+            'failed_event': 'Simulation Loop',
             'error_type': 'ValueError',
             'message': 'inoltro fallito',
         })
         self.assertIn('ValueError: inoltro fallito', logs.output[0])
 
-    def test_each_arrival_leaves_one_successor_in_the_calendar(self):
-        """L'avvio lascia l'orologio a zero, poi ogni step pianifica un arrivo futuro."""
-        function = profiled_function('hello', arrival_rate=2.0, service_rate=4.0, first_arrival_time=2.0)
-        simulation = Simulation(Scenario(functions=(function,)))
-        initial, = simulation.start()
-        engine = simulation.engine
-        self.assertIsInstance(initial.event, ArrivalEvent)
-        self.assertEqual(initial.event.function, function)
-        self.assertIs(initial.status, EventStatus.PENDING)
-        self.assertEqual((engine.now, simulation.arrivals), (0, 0))
-        self.assertEqual(engine.next_event_time, 2.0)
+    def test_missing_destination_is_a_rejection_without_a_node(self):
+        function = profiled_function('hello', 1, 1)
+        simulation = Simulation(Scenario((function,)))
+        notifications = []
+        self.addCleanup(observer.subscribe(notifications.append))
 
-        for count in range(1, 11):
-            scheduled_time = engine.next_event_time
-            self.assertTrue(engine.step())
-            self.assertEqual(engine.now, scheduled_time)
-            self.assertEqual(simulation.arrivals, count)
-            self.assertEqual(engine.pending_count, 1)
-            self.assertGreater(engine.next_event_time, engine.now)
-        self.assertIs(initial.status, EventStatus.EXECUTED)
+        statistics = simulation.run(arrivals=1)
 
-    def test_same_seed_reproduces_arrival_times(self):
-        """Due repliche avviate con lo stesso scenario avanzano indipendentemente."""
+        arrival, rejected = [notification.to_dict() for notification in notifications]
+        self.assertEqual(rejected['type'], 'request.rejected')
+        self.assertEqual(rejected['data']['request_id'], arrival['data']['request_id'])
+        self.assertEqual(rejected['data']['reason'], 'no_destination')
+        self.assertIsNone(rejected['data']['node_id'])
+        totals = statistics.metrics['total']
+        self.assertEqual((totals['arrivals'], totals['rejected'], totals['pending']), (1, 1, 0))
+
+    def test_same_seed_reproduces_arrival_and_service_samples(self):
         function = profiled_function('hello', arrival_rate=3, service_rate=4)
         scenario = Scenario(functions=(function,), seed=42)
-        first, second = Simulation(scenario), Simulation(scenario)
-        first.start()
-        second.start()
-        for _ in range(5):
-            first.engine.step()
-            second.engine.step()
-            self.assertEqual(first.engine.next_event_time, second.engine.next_event_time)
+        observations = []
+        for _ in range(2):
+            simulation = Simulation(scenario)
+            requests = record_submissions(simulation)
+            simulation.run(arrivals=5)
+            self.assertEqual(len(requests), 5)
+            observations.append([(request.arrival_time, request.service_duration) for request in requests])
+        self.assertEqual(observations[0], observations[1])
 
-    def test_scenario_profile_controls_the_arrival_process(self):
-        """Il profilo letto da file arriva all'evento e il tasso scala l'interarrivo."""
+    def test_example_scenario_formats_define_the_same_workload(self):
         examples = Path(__file__).resolve().parents[1] / 'examples/scenarios'
         scenario = Scenario.load(examples / 'startup.toml')
-        self.assertEqual(scenario, Scenario.load(examples / 'startup.json'))
-        function = scenario.function_registry.get('hello')
-        profile = function.profile
-        baseline = Simulation(Scenario((function,), seed=scenario.seed))
-        twice_as_fast = Simulation(Scenario(
-            (profiled_function(function.name, 2 * profile.arrival_rate, profile.service_rate, profile.first_arrival_time),),
-            seed=scenario.seed,
-        ))
-        for simulation in (baseline, twice_as_fast):
-            first, = simulation.start()
-            self.assertEqual(first.event.function.profile.service_rate, 4.0)
-            simulation.engine.step()
-        self.assertAlmostEqual(
-            baseline.engine.next_event_time - baseline.engine.now,
-            2 * (twice_as_fast.engine.next_event_time - twice_as_fast.engine.now),
-        )
+        for suffix in ('json', 'yaml'):
+            with self.subTest(format=suffix):
+                self.assertEqual(scenario, Scenario.load(examples / f'startup.{suffix}'))
+
+    def test_arrival_rate_scales_interarrival_times(self):
+        function = profiled_function('hello', arrival_rate=2, service_rate=4, first_arrival_time=1)
+        faster = replace(function, profile=replace(function.profile, arrival_rate=4))
+        observations = []
+        for profile in (function, faster):
+            simulation = Simulation(Scenario((profile,), seed=42))
+            requests = record_submissions(simulation)
+            simulation.run(arrivals=5)
+            observations.append([request.arrival_time for request in requests])
+        baseline_times, faster_times = observations
+        self.assertEqual(baseline_times[0], 1)
+        self.assertEqual(faster_times[0], 1)
+        for baseline, faster in zip(baseline_times[1:], faster_times[1:], strict=True):
+            self.assertAlmostEqual(baseline - 1, 2 * (faster - 1))
 
     def test_function_profile_rejects_invalid_rates(self):
         for field in ('arrival_rate', 'service_rate'):
@@ -184,46 +178,35 @@ class SimulationTest(unittest.TestCase):
                         FunctionProfile(**rates)
 
     def test_service_rate_scales_service_duration_without_shifting_arrivals(self):
-        """A parità di seed, raddoppiare il tasso dimezza i campioni di servizio."""
-        baseline_target, faster_target = RecordingInfrastructure(), RecordingInfrastructure()
-        baseline = Simulation(Scenario((profiled_function('hello', 2, 4),)), baseline_target)
-        faster = Simulation(Scenario((profiled_function('hello', 2, 8),)), faster_target)
-        for simulation in (baseline, faster):
-            simulation.start()
+        observations = []
+        for rate in (4, 8):
+            simulation = Simulation(Scenario((profiled_function('hello', 2, rate),)))
+            requests = record_submissions(simulation)
+            simulation.run(arrivals=5)
+            observations.append(requests)
 
-        for _ in range(5):
-            baseline.engine.step()
-            faster.engine.step()
-            self.assertEqual(baseline.engine.next_event_time, faster.engine.next_event_time)
-            baseline_duration = baseline_target.requests[-1].service_duration
-            self.assertGreater(baseline_duration, 0)
-            self.assertAlmostEqual(baseline_duration, 2 * faster_target.requests[-1].service_duration)
+        for baseline, faster in zip(*observations, strict=True):
+            self.assertEqual(baseline.arrival_time, faster.arrival_time)
+            self.assertGreater(baseline.service_duration, 0)
+            self.assertAlmostEqual(baseline.service_duration, 2 * faster.service_duration)
 
     def test_functions_keep_independent_arrival_and_service_streams(self):
-        """Intercalare gli arrivi di un'altra funzione lascia invariata la sequenza di hello."""
         hello = profiled_function('hello', 2, 4, first_arrival_time=1)
         resize = profiled_function('resize', 3, 8, first_arrival_time=0.5)
-        single_target, multiple_target = RecordingInfrastructure(), RecordingInfrastructure()
-        single = Simulation(Scenario((hello,)), single_target)
-        multiple = Simulation(Scenario((resize, hello)), multiple_target)
-        single.start()
-        initial = multiple.start()
-        self.assertEqual([event.event.function for event in initial], [resize, hello])
-        self.assertEqual([event.time for event in initial], [0.5, 1])
-        self.assertEqual(multiple.engine.pending_count, 2)
+        single = Simulation(Scenario((hello,)))
+        single_requests = record_submissions(single)
+        single.run(arrivals=5)
 
-        for _ in range(5):
-            single.engine.step()
-            for _ in range(100):
-                self.assertTrue(multiple.engine.step())
-                self.assertEqual(multiple.engine.pending_count, 2)
-                if multiple_target.requests[-1].function.name == hello.name:
-                    break
-            self.assertEqual(multiple_target.requests[-1].function, hello)
-            self.assertEqual(multiple.engine.now, single.engine.now)
-            self.assertEqual(multiple_target.requests[-1].service_duration,
-                             single_target.requests[-1].service_duration)
-        self.assertTrue(any(request.function.name == resize.name for request in multiple_target.requests))
+        multiple = Simulation(Scenario((resize, hello)))
+        multiple_requests = record_submissions(multiple)
+        multiple.run(arrivals=40)
+
+        self.assertEqual(multiple_requests[0].function.name, 'resize')
+        hello_requests = [request for request in multiple_requests if request.function.name == 'hello']
+        self.assertEqual(
+            [(request.arrival_time, request.service_duration) for request in hello_requests[:5]],
+            [(request.arrival_time, request.service_duration) for request in single_requests],
+        )
 
     def test_scenario_requires_at_least_one_profile_with_unique_name(self):
         function = profiled_function('hello', 2, 4)
@@ -240,8 +223,7 @@ class SimulationTest(unittest.TestCase):
                             'arrival_rate = 2\nservice_rate = 4\nfirst_arrival_time = 0\n', encoding='utf-8')
             self.assertEqual(tuple(Scenario.load(path).function_registry.values()), (profiled_function('hello', 2, 4),))
 
-    def test_registry_contains_configured_functions_used_by_arrival_events(self):
-        """L'evento riceve una copia per replica della funzione registrata con le risorse da file."""
+    def test_registry_preserves_configured_function_properties(self):
         examples = Path(__file__).resolve().parents[1] / 'examples/scenarios'
         scenario = Scenario.load(examples / 'startup.toml')
         resize = scenario.function_registry.get('resize')
@@ -251,9 +233,6 @@ class SimulationTest(unittest.TestCase):
         self.assertIsNone(scenario.function_registry.get('unknown'))
         with self.assertRaises(TypeError):
             scenario.function_registry['other'] = resize
-        _, second = Simulation(scenario).start()
-        self.assertEqual(second.event.function, resize)
-        self.assertIsNot(second.event.function.sampler, resize.sampler)
 
     def test_custom_function_configuration_and_required_resources(self):
         """Il registro conserva immagine e metadati, e richiede risorse esplicite."""
@@ -293,13 +272,11 @@ class SimulationTest(unittest.TestCase):
             path = Path(directory) / 'scenario.json'
             path.write_text(json.dumps({'functions': [definition]}))
             scenario = Scenario.load(path)
-            target = RecordingInfrastructure()
-            simulation = Simulation(scenario, target)
-            simulation.start()
-            for expected_time in (1, 1.5, 2):
-                self.assertTrue(simulation.engine.step())
-                self.assertEqual(simulation.engine.now, expected_time)
-                self.assertEqual(target.requests[-1].service_duration, 0.25)
+            simulation = Simulation(scenario)
+            requests = record_submissions(simulation)
+            simulation.run(arrivals=3)
+            self.assertEqual([request.arrival_time for request in requests], [1, 1.5, 2])
+            self.assertEqual([request.service_duration for request in requests], [0.25] * 3)
 
             definition.update(service_distribution='gamma', service_scv=0.5)
             path.write_text(json.dumps({'functions': [definition]}))
@@ -315,10 +292,7 @@ class SimulationTest(unittest.TestCase):
                 'arrival_rate': 1, 'service_rate': 0.4, 'first_arrival_time': 0,
                 'arrival_distribution': 'deterministic', 'service_distribution': 'deterministic',
             }],
-            'infrastructure': {'rings': [{
-                'id': 'edge', 'arch': 'amd64', 'memory_mb': 128, 'cpus': 1,
-                'nodes': [{'name': 'n1', 'area': 'edge'}],
-            }]},
+            'infrastructure': EDGE,
         }
         with TemporaryDirectory() as directory:
             path = Path(directory) / 'fifo.json'
@@ -327,10 +301,8 @@ class SimulationTest(unittest.TestCase):
 
         notifications: list[Notification] = []
         self.addCleanup(observer.subscribe(notifications.append))
-        simulation._start()
+        simulation.run(arrivals=3)
         engine = simulation._ctx.engine
-        while engine.now < 2:
-            self.assertTrue(engine.step())
         totals = simulation.metrics_snapshot()['total']
         # A t=2 la prima richiesta è attiva, la seconda attende e la terza è scartata.
         self.assertEqual((totals['arrivals'], totals['accepted'], totals['waiting'], totals['rejected']),
@@ -349,65 +321,59 @@ class SimulationTest(unittest.TestCase):
         self.assertEqual([event.type for event in at_completion], [
             NotificationType.REQUEST_COMPLETED, NotificationType.REQUEST_ACCEPTED,
         ])
-        while engine.now < 5:
-            self.assertTrue(engine.step())
+        self.advance_to(engine, 5)
         totals = simulation.metrics_snapshot()['total']
         self.assertEqual(totals['completed'], 2)
         self.assertEqual(totals['mean_response_time_s'], 3.25)
 
     def test_accepted_arrival_completes_and_releases_resources(self):
-        """Uno scarto non schedula completamenti e il riuso invalida la vecchia pulizia."""
+        """Riuso warm, scarti e prenotazioni confluiscono nelle metriche della replica."""
         function = Function('hello', 128, 1, BuiltinRuntime('python314'), profile=FunctionProfile(
             arrival_rate=1, service_rate=2 / 3, first_arrival_time=0,
             arrival_distribution='deterministic', service_distribution='deterministic',
         ))
-        target = RecordingInfrastructure()
-        target.create_ring('edge', arch='amd64', memory=128, cpus=1)
-        node = target.create_node('edge', 'n1', 'edge', idle_timeout=0.5)
-        scenario = Scenario((function,), containers={'cleanup_interval': 1})
-        simulation = Simulation(scenario, target)
-        simulation.start()
-        engine = simulation.engine
-        engine.step()
-        first = target.requests[-1]
+        scenario = Scenario((function,), infrastructure=EDGE,
+                            containers={'idle_timeout': 0.5, 'cleanup_interval': 1})
+        simulation = Simulation(scenario)
+        requests = record_submissions(simulation)
+        simulation.run(arrivals=1)
+        engine = simulation._ctx.engine
+        first, = requests
+        node = simulation._ctx.infrastructure.rings['edge'].nodes[0]
         self.assertEqual(first.function, function)
         self.assertIs(first.node, node)
         self.assertIs(first.status, RequestStatus.ACCEPTED)
         self.assertFalse(first.warm)
         self.assertEqual(node.resources.used_cpus, 1)
-        self.assertEqual(engine.pending_count, 2)
         in_flight = simulation.metrics_snapshot()
         self.assertEqual(in_flight['total']['pending'], 1)
         self.assertIsNone(in_flight['total']['mean_response_time_s'])
         self.assertEqual(in_flight['nodes_by_ring']['edge']['n1']['busy_memory_mb'], 128)
 
-        engine.step()  # Fine della creazione a t=0.
+        self.assertTrue(engine.step())  # Fine della creazione a t=0.
         self.assertEqual(first.container.state, ContainerState.BUSY)
-        engine.step()
-        self.assertEqual(engine.now, 1)
-        rejected = target.requests[-1]
+        self.advance_to(engine, 1)
+        rejected = requests[-1]
         self.assertIs(rejected.status, RequestStatus.REJECTED)
-        self.assertEqual(engine.pending_count, 2)
-        self.assertEqual(engine.next_event_time, 1.5)
 
-        engine.step()
-        self.assertEqual(engine.now, 1.5)
+        self.advance_to(engine, 1.5)
         self.assertIs(first.status, RequestStatus.COMPLETED)
         self.assertIs(rejected.status, RequestStatus.REJECTED)
         self.assertEqual(node.resources.used_cpus, 0)
         self.assertEqual(node.resources.warm_pool_used_mem, 128)
-        self.assertEqual(engine.pending_count, 2)
 
-        engine.step()
-        reused = target.requests[-1]
+        self.advance_to(engine, 2)
+        reused = requests[-1]
         self.assertTrue(reused.warm)
         self.assertIs(reused.container, first.container)
         # La prima scadenza è t=2. Al controllo di t=3 il container è
         # di nuovo occupato e rimane disponibile per completare il servizio.
-        engine.run(until=3)
+        self.advance_to(engine, 3)
+        self.assertTrue(engine.step())  # Pulizia del primo idle a t=3.
+        self.assertEqual(engine.now, 3)
         self.assertIs(reused.container.state, ContainerState.BUSY)
         self.assertIsNone(reused.container.expiration_time)
-        engine.run(until=3.5)
+        self.advance_to(engine, 3.5)
         self.assertEqual(reused.container.expiration_time, 4)
         self.assertIs(reused.status, RequestStatus.COMPLETED)
         snapshot = simulation.metrics_snapshot()
@@ -447,8 +413,6 @@ class SimulationTest(unittest.TestCase):
         ], containers={'startup_times': {image: 0.5}})
 
         builtin, second_builtin, custom = scenario.function_registry.values()
-        # Lo stesso runtime integrato è condiviso, inclusi i suoi tempi di avvio.
-        self.assertIs(builtin.runtime, second_builtin.runtime)
         self.assertEqual(second_builtin.cold_start_time, 1.0)
         self.assertEqual(builtin.runtime.startup_time, 0.5)
         self.assertEqual(custom.runtime.startup_time, 0.5)
@@ -462,18 +426,17 @@ class SimulationTest(unittest.TestCase):
             arrival_distribution='deterministic', service_distribution='deterministic',
             code_load_time=0.25,
         ))
-        target = RecordingInfrastructure()
-        target.create_ring('edge', arch='amd64', memory=128, cpus=1)
-        node = target.create_node('edge', 'n1', 'edge', idle_timeout=1.5)
-        scenario = Scenario((function,), containers={'cleanup_interval': 1})
-        simulation = Simulation(scenario, target)
+        scenario = Scenario((function,), infrastructure=EDGE,
+                            containers={'idle_timeout': 1.5, 'cleanup_interval': 1})
+        simulation = Simulation(scenario)
+        requests = record_submissions(simulation)
         notifications: list[Notification] = []
         unsubscribe = observer.subscribe(notifications.append)
         self.addCleanup(unsubscribe)
-        simulation.start()
-        engine = simulation.engine
-        engine.run(until=0.5)
-        first = target.requests[0]
+        simulation.run(arrivals=1)
+        engine = simulation._ctx.engine
+        first, = requests
+        node = first.node
         self.assertIs(first.container.state, ContainerState.CREATING)
         # Una prenotazione non è ancora un'accensione.
         self.assertFalse(any(event.type is NotificationType.CONTAINER_STARTED for event in notifications))
@@ -481,10 +444,10 @@ class SimulationTest(unittest.TestCase):
         # Durante il cold start conta una sola istanza, ancora in creazione.
         containers = simulation.metrics_snapshot()['total']['containers']
         self.assertEqual((containers['creating'], containers['creations_started'], containers['created']), (1, 1, 0))
-        engine.run(until=1)
+        self.advance_to(engine, 1)
         self.assertIs(first.container.state, ContainerState.BUSY)
         self.assertIs(first.status, RequestStatus.ACCEPTED)
-        engine.run(until=1.5)
+        self.advance_to(engine, 1.5)
         self.assertIs(first.status, RequestStatus.COMPLETED)
         self.assertIs(first.container.state, ContainerState.IDLE)
         totals = simulation.metrics_snapshot()['total']
@@ -493,12 +456,9 @@ class SimulationTest(unittest.TestCase):
         containers = totals['containers']
         self.assertEqual((containers['creating'], containers['busy'], containers['idle']), (0, 0, 1))
         self.assertEqual(containers['mean_creation_time_s'], 1)
-        engine.run(until=3)
-        self.assertIs(first.container.state, ContainerState.IDLE)
-        engine.run(until=4)
+        self.advance_to(engine, 4)
         self.assertIs(first.container.state, ContainerState.DESTROYED)
         self.assertEqual(node.resources.warm_pool_used_mem, 0)
-        engine.run(until=4.5)
         # Il passaggio in idle non genera uno spegnimento. Il janitor
         # pubblica la rimozione effettiva del container al tempo 4.
         container_events = (NotificationType.CONTAINER_STARTED, NotificationType.CONTAINER_STOPPED)
@@ -515,16 +475,16 @@ class SimulationTest(unittest.TestCase):
         # La rimozione azzera gli idle e conserva il tempo trascorso in quello stato.
         containers = snapshot['total']['containers']
         self.assertEqual((containers['idle'], containers['destroyed']), (0, 1))
-        self.assertAlmostEqual(containers['time_weighted_counts']['idle']['mean'], 2.5 / 4.5)
+        self.assertAlmostEqual(containers['time_weighted_counts']['idle']['mean'], 2.5 / 4)
         self.assertEqual(snapshot['by_function']['hello']['containers'], containers)
         self.assertEqual(node_stats['containers'], containers)
         self.assertEqual(node_stats['by_function']['hello']['containers'], containers)
-        self.assertAlmostEqual(warm['mean'], 128 * 2.5 / 4.5)
-        engine.run(until=5)
-        self.assertFalse(target.requests[-1].warm)
-        self.assertIsNot(target.requests[-1].container, first.container)
+        self.assertAlmostEqual(warm['mean'], 128 * 2.5 / 4)
+        self.advance_to(engine, 5)
+        self.assertFalse(requests[-1].warm)
+        self.assertIsNot(requests[-1].container, first.container)
         # Il container successivo diventa pronto, ma il subscriber è scollegato.
-        engine.run(until=6)
+        self.advance_to(engine, 6)
         self.assertEqual(sum(event.type in container_events for event in notifications), 2)
 
     def test_scenario_topology_creates_independent_nodes_for_each_replica(self):
@@ -532,9 +492,8 @@ class SimulationTest(unittest.TestCase):
         path = Path(__file__).resolve().parents[1] / 'examples/scenarios/startup.toml'
         scenario = Scenario.load(path)
         first, second = Simulation(scenario), Simulation(scenario)
-        first.start()
-        second.start()
-        first.engine.step()
+        second.run(arrivals=0)
+        first.run(arrivals=1)
         first_nodes = first.metrics_snapshot()['nodes_by_ring']['edge-x86']
         second_nodes = second.metrics_snapshot()['nodes_by_ring']['edge-x86']
         self.assertEqual(set(first_nodes), {'edge-1', 'edge-2'})

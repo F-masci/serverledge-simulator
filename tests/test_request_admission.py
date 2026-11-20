@@ -2,8 +2,8 @@
 
 Riferimenti Infrascaler: internal/scheduling/policy_default.go, OnArrival;
 internal/node/pool.go, acquireWarmContainer e AcquireContainer.
-La coda è disabilitata: senza risorse si rifiuta. La creazione viene riservata,
-ma il suo esito resta esplicito, senza simulare il servizio in questo passo.
+L'esito della creazione è esplicito. I test coprono il limite di concorrenza
+e la FIFO locale configurabile.
 """
 
 import unittest
@@ -34,14 +34,33 @@ class RequestAdmissionTest(unittest.TestCase):
         rejected = Request(fun)
         self.assertFalse(node.submit(rejected))
         self.assertEqual(rejected.status, RequestStatus.REJECTED)
-        node.complete(first.container, 1)
-        node.complete(second.container, 2)
+        first.complete(1)
+        second.complete(2)
         third = Request(fun)
         self.assertTrue(node.submit(third))
         self.assertIs(third.container, first.container)
         with self.assertRaises(ValueError):
             node.submit(third)
         self.assertEqual(third.container.requests_count, 1)
+
+    def test_fifo_stops_at_blocked_head_and_new_arrivals_try_immediately(self):
+        """Segue OnCompletion e OnArrival della policy locale default in Go."""
+        node = Node('n', 256, 1, 'edge', 'amd64', queue_capacity=2)
+        fun = Function('f', 128, 1, BuiltinRuntime('python314'))
+        active, follower = Request(fun), Request(fun)
+        oversized = Request(Function('large', 128, 2, BuiltinRuntime('python314')))
+        self.assertTrue(node.submit(active))
+        node.creation_succeeded(active.container, 0)
+        self.assertTrue(node.submit(oversized))
+        self.assertTrue(node.submit(follower))
+
+        active.complete(1)
+        self.assertIs(oversized.status, RequestStatus.QUEUED)
+        self.assertIs(follower.status, RequestStatus.QUEUED)
+        new_arrival = Request(fun)
+        self.assertTrue(node.submit(new_arrival))
+        self.assertIs(new_arrival.status, RequestStatus.ACCEPTED)
+        self.assertIs(new_arrival.container, active.container)
 
     def test_callbacks_observe_request_after_each_transition(self):
         """La FIFO ammette la richiesta e i callback vedono lo stato aggiornato."""

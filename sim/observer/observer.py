@@ -80,14 +80,14 @@ class _Observer:
     def notify_request_rejected(self, request: Request):
         """Notifica il rifiuto di una richiesta."""
         ctx = self._ensure_context()
-        node = ensure_node(request)
+        node = request.node
         notification = RequestRejected(
             run_id=ctx.simulation.run_id,
             sim_time_s=ctx.engine.now,
             request_id=request.id,
             function=request.function.name,
             reason=request.rejection_reason or 'unknown',
-            node_id=node.id.key,
+            node_id=node.id.key if node is not None else None,
         )
         self.notify(notification)
 

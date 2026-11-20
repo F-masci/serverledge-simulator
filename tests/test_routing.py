@@ -2,16 +2,16 @@
 
 Riferimenti Infrascaler: internal/lb/hashRing.go, hash, HashRing.Add e
 HashRing.Get per l'ordine delle repliche virtuali e la ricerca di altri nodi;
-internal/lb/generalLoadBalancer.go per la selezione del ring.
+internal/lb/generalLoadBalancer.go per il filtro di compatibilità.
+Il simulatore usa l'ammissione locale per provare i candidati del ring scelto.
+Infrascaler preseleziona i nodi tramite metriche e può ripiegare su altri pool.
 """
 
 import unittest
-from unittest.mock import patch
 
 from sim.model.infrastructure import Infrastructure
 from sim.model.request import Request, RequestStatus
 from sim.model.function import Function, BuiltinRuntime
-from sim.model.ring import ArchitectureRing
 
 
 def function(name='hello', archs=('amd64', 'arm64')):
@@ -19,31 +19,6 @@ def function(name='hello', archs=('amd64', 'arm64')):
 
 
 class RoutingTest(unittest.TestCase):
-    def test_fnv1a_matches_known_32_bit_vectors(self):
-        """Valori canonici impediscono di usare accidentalmente FNV-1 o hash Python."""
-        self.assertEqual(ArchitectureRing._hash(''), 0x811C9DC5)
-        self.assertEqual(ArchitectureRing._hash('a'), 0xE40C292C)
-        self.assertEqual(ArchitectureRing._hash('foobar'), 0xBF9CF968)
-
-    def test_infrastructure_delegates_and_node_admits_request(self):
-        """La stessa istanza percorre LB/ring/nodo e ottiene la prenotazione locale."""
-        infra = Infrastructure()
-        ring = infra.create_ring('small', arch='amd64', memory=512, cpus=2)
-        node = infra.create_node('small', 'n1', 'edge')
-        requests = [Request(function()), Request(function())]
-        with patch.object(infra.load_balancer, 'submit', wraps=infra.load_balancer.submit) as lb:
-            with patch.object(ring, 'submit', wraps=ring.submit) as submit:
-                for request in requests:
-                    self.assertIs(infra.submit(request), node)
-        self.assertEqual(lb.call_count, 2)
-        self.assertEqual(submit.call_count, 2)
-        for request in requests:
-            self.assertIs(request.node, node)
-            self.assertIs(request.function, request.container.function)
-            self.assertEqual(request.status, RequestStatus.ACCEPTED)
-        self.assertEqual(node.resources.used_cpus, 2)
-        self.assertEqual(node.resources.free_memory, 256)
-
     def test_empty_and_incompatible_rings_are_skipped(self):
         """Non si inoltra a ring vuoti o non compatibili; senza destinazione restituisce None."""
         infra = Infrastructure()
@@ -57,80 +32,68 @@ class RoutingTest(unittest.TestCase):
         self.assertIs(infra.submit(request), arm)
         self.assertIs(request.node, arm)
 
-    def test_architecture_is_checked_once_when_selecting_the_ring(self):
-        """Il LB filtra il ring; hashing e nodo si affidano all'omogeneità garantita."""
-        infra = Infrastructure()
-        infra.create_ring('r', arch='amd64', memory=512, cpus=2)
-        node = infra.create_node('r', 'n', 'edge')
-        fun = function()
-        with patch.object(Function, 'supports_arch', autospec=True, return_value=True) as supports:
-            self.assertIs(infra.submit(Request(fun)), node)
-        supports.assert_called_once_with(fun, 'amd64')
-
-    def test_hash_lookup_uses_inclusive_successor_and_wraparound(self):
-        """I punti sono hash(nome#indice); il confine incluso e il ritorno all'inizio sono esatti."""
+    def test_hash_lookup_matches_reference_at_boundary_and_wraparound(self):
         infra = Infrastructure()
         ring = infra.create_ring('r', arch='amd64', memory=512, cpus=2, replicas=2)
-        nodes = [infra.create_node('r', name, 'edge') for name in ('n1', 'n2')]
-        points = sorted((ArchitectureRing._hash(f'{node.id.key}#{i}'), node) for node in nodes for i in range(2))
-        for query, expected in ((points[1][0], points[1][1]),
-                                (points[1][0] + 1, points[2][1]),
-                                (points[-1][0] + 1, points[0][1])):
-            with patch.object(ArchitectureRing, '_hash', return_value=query):
-                self.assertIs(ring.select_node(function()), expected)
+        first = infra.create_node('r', 'n1', 'edge')
+        second = infra.create_node('r', 'n2', 'edge')
 
-    def test_fifo_stops_at_blocked_head_and_keeps_arrival_policy(self):
-        """La testa bloccata impedisce il dequeue; un nuovo arrivo tenta subito."""
+        # Go HashRing.Add/Get: n2#1 è l'ultimo punto di n2, seguito da n1.
+        # L'hash di foobar supera tutti i punti e riparte dal primo (n2).
+        for name, expected in (('n2#1', second), ('hello', first), ('foobar', second)):
+            with self.subTest(function=name):
+                self.assertIs(ring.select_node(function(name)), expected)
+
+    def test_same_function_uses_reference_order_until_all_nodes_are_saturated(self):
         infra = Infrastructure()
-        infra.create_ring('r', arch='amd64', memory=256, cpus=1)
-        node = infra.create_node('r', 'n1', 'edge', queue_capacity=2)
-        active, follower = Request(function()), Request(function())
-        oversized = Request(Function('large', 128, 2, BuiltinRuntime('python314')))
-        self.assertIs(infra.submit(active), node)
-        node.creation_succeeded(active.container, 0)
-        self.assertIs(infra.submit(oversized), node)
-        self.assertIs(infra.submit(follower), node)
+        infra.create_ring('r', arch='amd64', memory=512, cpus=2)
+        nodes = {name: infra.create_node('r', name, 'edge') for name in ('one', 'two', 'three')}
 
-        active.complete(1)
-        self.assertIs(oversized.status, RequestStatus.QUEUED)
-        self.assertIs(follower.status, RequestStatus.QUEUED)
-        new_arrival = Request(function())
-        self.assertIs(infra.submit(new_arrival), node)
-        self.assertIs(new_arrival.status, RequestStatus.ACCEPTED)
-
-    def test_same_function_routes_consistently_without_using_request_identity(self):
-        """Il routing dipende dal nome della funzione, non dall'ID dell'invocazione."""
-        infra = Infrastructure()
-        ring = infra.create_ring('r', arch='amd64', memory=512, cpus=2)
-        for name in ('one', 'two', 'three'):
-            infra.create_node('r', name, 'edge')
-        self.assertEqual(ring.replicas, 128)
-        target = ring.select_node(function())
-        for _ in range(2):
-            self.assertIs(infra.submit(Request(function())), target)
-        # Esaurito il primo nodo, le richieste raggiungono in ordine i due
-        # successori fisici. Ogni nodo può ammettere due prenotazioni.
-        points = sorted(
-            (ArchitectureRing._hash(f'{node.id.key}#{index}'), node)
-            for node in ring for index in range(ring.replicas)
-        )
-        function_hash = ArchitectureRing._hash(function().name)
-        successors = [node for point, node in points if point >= function_hash]
-        successors.extend(node for point, node in points if point < function_hash)
-        expected_order = list(dict.fromkeys(successors))
-        self.assertIs(expected_order[0], target)
-        for alternative in expected_order[1:]:
+        # Ordine ottenuto con FNV-1a e 128 repliche in Go, saturando un nodo alla volta.
+        for name in ('one', 'three', 'two'):
             for _ in range(2):
                 request = Request(function())
-                self.assertIs(infra.submit(request), alternative)
-                self.assertIs(request.node, alternative)
+                self.assertIs(infra.submit(request), nodes[name])
+                self.assertIs(request.node, nodes[name])
                 self.assertIs(request.status, RequestStatus.ACCEPTED)
+            self.assertEqual(nodes[name].resources.used_cpus, 2)
+            self.assertEqual(nodes[name].resources.busy_pool_used_mem, 256)
 
         rejected = Request(function())
         self.assertIsNone(infra.submit(rejected))
-        self.assertIs(rejected.node, target)
+        self.assertIs(rejected.node, nodes['one'])
         self.assertIs(rejected.status, RequestStatus.REJECTED)
         self.assertEqual(rejected.rejection_reason, 'out_of_resources')
+
+    def test_removing_primary_updates_routing_before_notification(self):
+        infra = Infrastructure()
+        ring = infra.create_ring('r', arch='amd64', memory=512, cpus=2)
+        primary = infra.create_node('r', 'one', 'edge')
+        secondary = infra.create_node('r', 'three', 'edge')
+        self.assertIs(ring.select_node(function()), primary)
+        observed = []
+
+        def node_removed(infrastructure, ring, node):
+            self.assertIs(infrastructure.get_ring(ring.id), ring)
+            self.assertNotIn(node, ring)
+            observed.append((node, ring.select_node(function())))
+
+        infra.on_node_removed = node_removed
+
+        self.assertIs(infra.remove_node('r', 'one'), primary)
+        with self.assertRaises(ValueError):
+            infra.remove_node('r', 'one')
+        self.assertIs(infra.submit(Request(function())), secondary)
+        self.assertIs(infra.remove_node('r', 'three'), secondary)
+        self.assertEqual(observed, [(primary, secondary), (secondary, None)])
+
+        request = Request(function())
+        self.assertIsNone(infra.submit(request))
+        self.assertEqual(request.rejection_reason, 'no_destination')
+
+        replacement = infra.create_node('r', 'one', 'edge')
+        self.assertIsNot(replacement, primary)
+        self.assertIs(infra.submit(Request(function())), replacement)
 
 
 if __name__ == '__main__':

@@ -75,26 +75,28 @@ class ModelsTest(unittest.TestCase):
         self.assertEqual(c.state, ContainerState.DESTROYED)
         self.assertEqual(self.node.resources.free_memory, 512)
 
-    def test_idle_lifo_and_cpu_rejection(self):
-        """Verifica ordine di riuso idle e rifiuto di una nuova allocazione.
-
-        Con concorrenza uno, due richieste richiedono due container. Dopo i
-        completamenti, l'ultimo diventato idle è riutilizzato per primo.
-        Riattivati entrambi, le due CPU sono prenotate: un terzo acquire fallisce.
-        Questo caso copre il rifiuto della creazione per CPU esaurite, non il
-        distinto caso di riattivazione idle rifiutata per mancanza di CPU.
-        """
+    def test_warm_cpu_rejection_preserves_idle_inventory_and_lifo(self):
+        """Riproduce TestWarmCPURejectionPreservesIdleContainer di Infrascaler."""
         f = function(concurrency=1)
         a, b = self.node.acquire(f), self.node.acquire(f)
         self.node.creation_succeeded(a, 0)
         self.node.creation_succeeded(b, 0)
         self.node.complete(a, 1)
         self.node.complete(b, 2)
-        # Ordine idle dopo i completamenti: [a, b]; il prelievo è LIFO.
-        self.assertIs(self.node.acquire(f), b)
-        self.assertIs(self.node.acquire(f), a)
-        self.assertIsNone(self.node.acquire(f))
-        self.assertEqual(self.node.resources.used_cpus, 2)
+
+        blocker = Function('blocker', 128, 2, BuiltinRuntime('python314'))
+        pending = self.node.acquire(blocker)
+        pool = self.node.pools[f.name]
+        resources = self.node.resources
+        before = (resources.used_cpus, resources.busy_pool_used_mem, resources.warm_pool_used_mem)
+
+        self.assertIsNone(self.node.acquire(f, only_warm=True))
+        self.assertEqual(pool.idle, (a, b))
+        self.assertEqual((resources.used_cpus, resources.busy_pool_used_mem, resources.warm_pool_used_mem), before)
+
+        self.node.creation_failed(pending)
+        self.assertIs(self.node.acquire(f, only_warm=True), b)
+        self.assertIs(self.node.acquire(f, only_warm=True), a)
 
     def test_failed_creation_rolls_back_both_buckets(self):
         """Verifica il rollback di una creazione fallita normale o prewarm.
