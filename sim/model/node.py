@@ -169,13 +169,13 @@ class Node:
         pool = self._pool(function)
         container = pool._reusable_busy() if function.max_concurrency > 1 else None
         if container is not None:
-            container._acquire()
+            container.acquire()
             return container
         if pool.idle:
             if self.resources.available_cpus < function.cpu_demand:
                 return None
             container = pool._pop_idle()
-            container._acquire()
+            container.acquire()
             self.resources._activate(function)
             pool._add(container)
             self._notify_container_state(container, ContainerState.IDLE)
@@ -218,7 +218,7 @@ class Node:
 
     def creation_succeeded(self, container: DockerContainer, now: float, timeout: float | None = None) -> None:
         idle = self._pending.pop(container)
-        container._created(idle=idle, now=now, timeout=self._idle_timeout if timeout is None else timeout)
+        container.created(idle=idle, now=now, timeout=self._idle_timeout if timeout is None else timeout)
         self._pool(container.function)._add(container)
         self._notify_container_state(container, ContainerState.CREATING)
         if idle:
@@ -227,14 +227,14 @@ class Node:
     def creation_failed(self, container: DockerContainer) -> None:
         idle = self._pending.pop(container)
         self.resources._release(container.function, idle=idle)
-        container._destroy()
+        container.destroy()
         self._notify_container_state(container, ContainerState.CREATING)
 
     def complete(self, container: DockerContainer, now: float, timeout: float | None = None) -> None:
         pool = self._pools.get(container.function.name)
         if pool is None or container not in pool.busy:
             raise ValueError('Container non attivo su questo nodo')
-        container._complete(now, self._idle_timeout if timeout is None else timeout)
+        container.complete(now, self._idle_timeout if timeout is None else timeout)
         if container.state is ContainerState.IDLE:
             pool._remove_busy(container)
             pool._add(container)
@@ -253,7 +253,7 @@ class Node:
 
     def _destroy_idle(self, container: DockerContainer) -> None:
         pool = self._pools[container.function.name]
-        container._destroy()
+        container.destroy()
         pool._remove_idle(container)
         self.resources._release(container.function, idle=True)
         self._notify_container_state(container, ContainerState.IDLE)
@@ -271,7 +271,7 @@ class Node:
 
         for pool in self._pools.values():
             for container in pool._remove_expired(now):
-                container._destroy()
+                container.destroy()
                 self.resources._release(container.function, idle=True)
                 self._notify_container_state(container, ContainerState.IDLE)
 

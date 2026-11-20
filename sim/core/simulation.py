@@ -54,7 +54,7 @@ class Simulation:
         self._ctx = SimulationContext(
             scenario=scenario,
             simulation=self,
-            infrastructure=self._build_infrastructure(scenario),
+            infrastructure=Simulation._build_infrastructure(scenario),
             metrics=SimulationMetrics(),
         )
 
@@ -62,8 +62,10 @@ class Simulation:
         self._started = False
         self._ctx.observer.bind_context(self._ctx)
 
-    def _build_infrastructure(self, scenario: Scenario) -> Infrastructure:
+    @staticmethod
+    def _build_infrastructure(scenario: Scenario) -> Infrastructure:
         """Crea ring e nodi nuovi per la replica dallo scenario."""
+
         # Ogni replica costruisce ring e nodi propri dalla topologia dichiarata.
         infrastructure = Infrastructure()
         for ring in scenario.infrastructure.rings:

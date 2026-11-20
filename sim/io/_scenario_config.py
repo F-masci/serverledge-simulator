@@ -6,7 +6,7 @@ from types import MappingProxyType
 
 from sim.model.function import Function, FunctionProfile, Runtime
 from sim.utils.validation import finite_time, integer, nonempty_string, positive_integer, positive_number, \
-    nonnegative_integer, nonnegative_number
+    nonnegative_number
 
 
 @dataclass(frozen=True)
@@ -59,8 +59,10 @@ class _ContainersConfig:
         # - 'startup_times'
         if not isinstance(containers, Mapping) or containers.keys() - {'idle_timeout', 'cleanup_interval', 'startup_times'}:
             raise ValueError('containers accetta solo idle_timeout, cleanup_interval e startup_times')
-        idle_timeout = nonnegative_integer(containers.get('idle_timeout', 600), 'containers.idle_timeout')
-        cleanup_interval = positive_integer(containers.get('cleanup_interval', 30), 'containers.cleanup_interval')
+        idle_timeout = finite_time(containers.get('idle_timeout', 600.0), 'containers.idle_timeout')
+        idle_timeout = nonnegative_number(idle_timeout, 'containers.idle_timeout')
+        cleanup_interval = finite_time(containers.get('cleanup_interval', 30.0), 'containers.cleanup_interval')
+        cleanup_interval = positive_number(cleanup_interval, 'containers.cleanup_interval')
 
         # Parse dei tempi di avvio per immagine Docker.
         startup_times = containers.get('startup_times', {})
