@@ -17,6 +17,7 @@ from ..model.request import Request
 
 if TYPE_CHECKING:
     from sim.core.simulation import SimulationContext
+    from ..model.region import Region
 
 
 class _Observer:
@@ -79,10 +80,10 @@ class _Observer:
             'ring_id': self._node_rings.get(node),
         }
 
-    def notify_arrival(self, request: Request, *, region: str | None = None) -> None:
-        """Notifica l'arrivo di una richiesta per una funzione."""
+    def notify_arrival(self, request: Request, *, region: 'Region | None' = None) -> None:
+        """Notifica l'arrivo di una richiesta nella regione di ingresso."""
         fields = self._request_fields(request)
-        fields['region'] = region
+        fields['region'] = region.name if region is not None else None
         self.notify(RequestArrived(**fields))
 
     def notify_request_queued(self, request: Request) -> None:

@@ -50,9 +50,9 @@ class SimulationContext:
         object.__setattr__(self, 'observer', observer)
 
     @property
-    def infrastructure(self) -> Infrastructure | None:
-        """Infrastruttura della regione primaria."""
-        return self.regions[self.scenario.primary_region].infrastructure
+    def now(self) -> float:
+        """Tempo simulato in secondi."""
+        return self.engine.now
 
 
 class Simulation:
@@ -70,9 +70,19 @@ class Simulation:
             regions=self._build_regions(scenario),
             metrics=SimulationMetrics(),
         )
+
+        # Determina la regione di ingresso e il nodo di ingresso,
+        # se specificato nello scenario.
+        #
+        # La regione di ingresso è quella specificata nell'invocazione
+        # dello scenario o, in mancanza, la regione primaria.
+        # Il nodo di ingresso è quello specificato nell'invocazione, se presente.
+        #
+        # Se il nodo di ingresso non è specificato, la richiesta viene consegnata
+        # alla regione di ingresso e lo scheduler della regione deciderà il nodo di destinazione.
         invocation = scenario.invocation
-        self._entry_region = self.regions[invocation.entry_region or scenario.primary_region]
-        self._entry_node = None
+        self._entry_region: Region = self.regions[invocation.entry_region or scenario.primary_region]
+        self._entry_node: Node | None = None
         if invocation.entry_node is not None:
             infrastructure = self._entry_region.infrastructure
             assert infrastructure is not None
@@ -80,6 +90,15 @@ class Simulation:
 
         # Flag per evitare di avviare la simulazione più volte
         self._started = False
+        
+    ### Simulation ###
+    
+    @property
+    def now(self) -> float:
+        """Tempo simulato in secondi."""
+        return self._ctx.now
+        
+    ### Infrastructure ###
 
     @property
     def regions(self) -> Mapping[str, Region]:
@@ -150,50 +169,9 @@ class Simulation:
                         remote_region=regions[node_config.remote_region] if node_config.remote_region is not None else None,
                     ))
 
-    def submit(self, request: Request, *, region: str | None = None) -> Node | None:
-        """Consegna un arrivo esterno alla regione indicata o all'ingresso dello scenario."""
-        request.ensure_created()
-        entry = self._entry_region if region is None else self.regions[region]
-        node = self._entry_node if region is None else None
-        self._ctx.observer.notify_arrival(request, region=entry.name)
-        destination = entry.submit(request, now=self._ctx.engine.now, node=node)
-        self._notify_submission(request)
-        return destination
-
-    def _forward_region(self, request: Request, destination: Region, source_node: Node) -> Node | None:
-        source = request.region
-        assert source is not None
-        target = None
-        if destination.infrastructure is not None and not destination.has_load_balancer:
-            target = destination.first_registered_node()
-            if target is None or not request.function.supports_arch(target.id.arch):
-                request.reject('out_of_resources', node=source_node)
-                return None
-        request.mark_offloaded(source_node)
-        delay = destination.offload_latency_from(source.name) / 2
-        request.start_transfer(destination, delay)
-        self._ctx.observer.notify_request_forwarded(request, source.name)
-        if delay == 0:
-            self._ctx.observer.notify_request_delivered(request)
-            return destination.submit(request, now=self._ctx.engine.now, node=target)
-        self._ctx.engine.schedule_after(delay, RegionDeliveryEvent(request, destination, target, ctx=self._ctx))
-        return None
-
-    def deliver_region(self, request: Request, region: Region, node: Node | None = None) -> None:
-        now = self._ctx.engine.now
-        self._ctx.observer.notify_request_delivered(request)
-        region.submit(request, now=now, node=node)
-        self._notify_submission(request)
-
-    def _notify_submission(self, request: Request) -> None:
-        observer = self._ctx.observer
-        if request.status is RequestStatus.ACCEPTED:
-            observer.notify_request_accepted(request)
-            self._schedule_execution(request)
-        elif request.status is RequestStatus.REJECTED:
-            observer.notify_request_rejected(request)
-        elif request.status is RequestStatus.QUEUED:
-            observer.notify_request_queued(request)
+    #############################
+    ### Simulation management ###
+    #############################
 
     def run(self, arrivals: int) -> FinalStatistics:
         """Avvia la replica e la esegue senza orizzonte, salvo un limite di arrivi."""
@@ -215,6 +193,7 @@ class Simulation:
         """Pianifica un primo arrivo per ogni funzione, in ordine di configurazione."""
         if self._started:
             raise RuntimeError('Simulazione già avviata')
+
         # Inizializza l'infrastruttura e registra i nodi
         # per la raccolta delle metriche.
         #
@@ -236,15 +215,44 @@ class Simulation:
             assert profile is not None
 
             # Crea una copia del campionatore per evitare conflitti tra le occorrenze di arrivo.
-            f = replace(function, sampler=deepcopy(function.sampler))
+            function = replace(function, sampler=deepcopy(function.sampler))
 
             # Pianifica l'arrivo iniziale al tempo specificato nel profilo della funzione.
-            event = ArrivalEvent(f, ctx=self._ctx)
+            event = ArrivalEvent(ctx=self._ctx, function=function,
+                entry_region=self._entry_region, entry_node=self._entry_node,
+                on_request_submitted=self._notify_request_submission,
+                on_request_accepted=self._schedule_execution
+            )
             scheduled_event = self._ctx.engine.schedule(profile.first_arrival_time, event)
             first_arrivals.append(scheduled_event)
 
         self._started = True
         return tuple(first_arrivals)
+
+    def _forward_region(self, request: Request, destination: Region, source_node: Node) -> Node | None:
+        source = request.region
+        assert source is not None
+        target = None
+        if destination.infrastructure is not None and not destination.has_load_balancer:
+            target = destination.first_registered_node()
+            if target is None or not request.function.supports_arch(target.id.arch):
+                request.reject('out_of_resources', node=source_node)
+                return None
+        request.mark_offloaded(source_node)
+        delay = destination.offload_latency_from(source.name) / 2
+        request.start_transfer(destination, delay)
+        self._ctx.observer.notify_request_forwarded(request, source.name)
+        if delay == 0:
+            self._ctx.observer.notify_request_delivered(request)
+            return destination.submit(request, now=self.now, node=target)
+        self._ctx.engine.schedule_after(delay, RegionDeliveryEvent(request, destination, target, ctx=self._ctx))
+        return None
+
+    def deliver_region(self, request: Request, region: Region, node: Node | None = None) -> None:
+        now = self.now
+        self._ctx.observer.notify_request_delivered(request)
+        region.submit(request, now=now, node=node)
+        self._notify_request_submission(request)
 
     def _bind_node_callbacks(self, node: Node, region: str, ring_id: str) -> None:
         """Associa le callback per gli eventi dei nodi."""
@@ -257,7 +265,7 @@ class Simulation:
         metrics = self.metrics_snapshot()
         return FinalStatistics(
             run_id=self.run_id,
-            sim_time_s=self._ctx.engine.now,
+            sim_time_s=self.now,
             outcome='completed',
             metrics=metrics,
             summary=format_metrics(metrics),
@@ -289,7 +297,7 @@ class Simulation:
 
     def _request_dequeued(self, node: Node, request: Request) -> None:
         """Notifica l'ammissione della richiesta uscita dalla FIFO."""
-        queue_wait = self._ctx.engine.now - request.region_arrival_time
+        queue_wait = self.now - request.region_arrival_time
         self._ctx.observer.notify_request_dequeued(request)
         self._ctx.observer.notify_request_accepted(request, queue_wait_s=queue_wait)
         self._schedule_execution(request)
@@ -301,7 +309,7 @@ class Simulation:
         """Pubblica il fallimento di un'occorrenza per questa replica."""
         self._ctx.observer.notify(SimulationError(
             run_id=self.run_id,
-            sim_time_s=self._ctx.engine.now,
+            sim_time_s=self.now,
             failed_event=type(event.event).__name__,
             exception=error,
         ))
@@ -311,7 +319,7 @@ class Simulation:
         expiration = container.expiration_time
         assert expiration is not None  # Il nodo notifica solo container in idle.
         interval = self._ctx.scenario.containers.cleanup_interval
-        deadline = max(expiration, self._ctx.engine.now)
+        deadline = max(expiration, self.now)
         tick = floor(deadline / interval) + 1
         check_time = tick * interval
         if check_time <= deadline:
@@ -322,4 +330,18 @@ class Simulation:
 
     def metrics_snapshot(self) -> dict:
         """Raccoglie le metriche della replica al tempo corrente."""
-        return self._ctx.metrics.snapshot(self._ctx.engine.now, self.regions, self._ctx.scenario.primary_region)
+        return self._ctx.metrics.snapshot(self.now, self.regions, self._ctx.scenario.primary_region)
+
+    #############################
+    ### Notification handlers ###
+    #############################
+
+    def _notify_request_submission(self, request: Request) -> None:
+        """Notifica l'esito della submission nella regione di ingresso."""
+        observer = self._ctx.observer
+        if request.status is RequestStatus.ACCEPTED:
+            observer.notify_request_accepted(request)
+        elif request.status is RequestStatus.REJECTED:
+            observer.notify_request_rejected(request)
+        elif request.status is RequestStatus.QUEUED:
+            observer.notify_request_queued(request)

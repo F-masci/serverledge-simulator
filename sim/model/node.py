@@ -35,8 +35,8 @@ class NodeID:
 class Resources:
     """Prenotazioni locali; RAM in unità da 2**20 byte, CPU frazionarie.
 
-    Le mutazioni sono coordinate
-    dal nodo insieme ai pool; le proprietà pubbliche sono di sola lettura.
+    Le mutazioni sono coordinate dal nodo insieme ai pool;
+    le proprietà pubbliche sono di sola lettura.
     """
 
     def __init__(self, total_memory: int, total_cpus: float) -> None:
@@ -82,6 +82,7 @@ class Resources:
         return self.total_cpus - self.used_cpus
 
     def reserve(self, function: Function, *, idle: bool) -> None:
+        """Prenota risorse per una funzione, nel pool busy o warm."""
         if idle:
             self._warm_pool_used_mem += function.memory_mb
         else:
@@ -89,6 +90,7 @@ class Resources:
             self._used_cpus += function.cpu_demand
 
     def release(self, function: Function, *, idle: bool) -> None:
+        """Rilascia le risorse occupate da una funzione."""
         if idle:
             self._warm_pool_used_mem -= function.memory_mb
         else:
@@ -96,10 +98,12 @@ class Resources:
             self._used_cpus -= function.cpu_demand
 
     def activate(self, function: Function) -> None:
+        """Attiva una funzione, spostandola dal pool warm a quello busy."""
         self.release(function, idle=True)
         self.reserve(function, idle=False)
 
     def deactivate(self, function: Function) -> None:
+        """Disattiva una funzione, spostandola dal pool busy a quello warm."""
         self.release(function, idle=False)
         self.reserve(function, idle=True)
 
