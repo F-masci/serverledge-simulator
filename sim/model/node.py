@@ -148,9 +148,6 @@ class Node:
         self.on_container_destroyed: Callable[[Node, DockerContainer], None] | None = None
 
         self.on_request_submitted: Callable[[Node, Request], None] | None = None
-        self.on_request_accepted: Callable[[Node, Request], None] | None = None
-        self.on_request_rejected: Callable[[Node, Request], None] | None = None
-        self.on_request_completed: Callable[[Node, Request], None] | None = None
         self.on_request_dequeued: Callable[[Node, Request], None] | None = None
 
     ### Identification ###
@@ -375,9 +372,17 @@ class Node:
         senza esecuzione automatica.
         """
         request.ensure_created()
+
+        # Si notifica l'invio della richiesta al nodo, prima di tentare l'ammissione.
+        if self.on_request_submitted is not None:
+            self.on_request_submitted(self, request)
+
+        # Si tenta di acquisire un container per la funzione richiesta; se non ci sono risorse, si accoda la richiesta.
         container = self.acquire(request.function)
         if container is None:
             return self.enqueue(request, reject_on_failure=reject_on_failure)
+
+        # Se l'ammissione ha successo, si notifica l'accettazione della richiesta sul container.
         request.accept_on_container(container=container)
         return True
 
@@ -408,6 +413,8 @@ class Node:
             # Se la richiesta può essere ammesse, si rimuove dalla coda e si notifica l'ammissione.
             request = self._queue.popleft()
             request.accept_on_container(container)
+            if self.on_request_dequeued is not None:
+                self.on_request_dequeued(self, request)
 
     ## Callback handling ##
 
@@ -423,26 +430,6 @@ class Node:
             container.on_acquire = partial(on_acquire, self)
         if on_destroyed is not None:
             container.on_destroyed = partial(on_destroyed, self)
-
-    def _bind_request_callbacks(self, request: Request) -> None:
-        """Associa le callback del nodo a una richiesta."""
-        on_submitted = self.on_request_submitted
-        on_accepted = self.on_request_accepted
-        on_rejected = self.on_request_rejected
-        on_completed = self.on_request_completed
-        on_dequeued = self.on_request_dequeued
-
-        if on_submitted is not None:
-            request.on_submitted = partial(on_submitted, self)
-        if on_accepted is not None:
-            request.on_accepted = partial(on_accepted, self)
-        if on_rejected is not None:
-            request.on_rejected = partial(on_rejected, self)
-        if on_completed is not None:
-            request.on_completed = partial(on_completed, self)
-        if on_dequeued is not None:
-            request.on_dequeued = partial(on_dequeued, self)
-
 
     def __repr__(self) -> str:
         return self.id.key

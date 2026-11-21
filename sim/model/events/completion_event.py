@@ -21,8 +21,8 @@ class CompletionEvent(Event):
             self.ctx.engine.schedule_after(request.return_delay, ResponseEvent(request, ctx=self.ctx))
             return
 
-        self.ctx.observer.notify_request_completed(request)
         request.complete(now)
+        self.ctx.observer.notify_request_completed(request)
 
 
 @dataclass(frozen=True)
@@ -32,5 +32,5 @@ class ResponseEvent(Event):
     def execute(self) -> None:
         if self.request.status is not RequestStatus.RESPONDING:
             raise ValueError('La richiesta non ha una risposta in transito')
-        self.ctx.observer.notify_request_completed(self.request)
         self.request.finish_response()
+        self.ctx.observer.notify_request_completed(self.request)

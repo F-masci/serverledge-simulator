@@ -144,7 +144,6 @@ class ArchitectureRing:
         if node is None:
             return None
 
-        request.select_ring(self)
         if schedule is not None:
             destination = schedule(request, node)
         else:

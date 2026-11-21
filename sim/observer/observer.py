@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING
 
 from .notifications import (
     ContainerStarted, ContainerStateChanged, ContainerStopped, NodeRegistered, Notification,
-    RequestAccepted, RequestArrived, RequestCompleted, RequestDelivered, RequestForwarded, RequestQueued,
-    RequestRejected,
+    RequestAccepted, RequestArrived, RequestCompleted, RequestDelivered, RequestDequeued, RequestForwarded,
+    RequestQueued, RequestRejected,
 )
 from .notifications.node import ContainerSnapshot, ResourceSnapshot
 from ..model.container import ContainerState, DockerContainer
@@ -90,6 +90,12 @@ class _Observer:
         node = request.node
         assert node is not None
         self.notify(RequestQueued(**self._request_fields(request), node_id=node.id.key))
+
+    def notify_request_dequeued(self, request: Request) -> None:
+        """Notifica l'estrazione dalla FIFO del nodo."""
+        node = request.node
+        assert node is not None
+        self.notify(RequestDequeued(**self._request_fields(request), node_id=node.id.key))
 
     def notify_request_forwarded(self, request: Request, source: str) -> None:
         """Notifica la partenza verso un'altra regione."""

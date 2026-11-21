@@ -49,6 +49,16 @@ class RequestQueued(_RequestNotification):
 
 
 @dataclass(frozen=True)
+class RequestDequeued(_RequestNotification):
+    """La richiesta è uscita dalla FIFO del nodo."""
+
+    type = NotificationType.REQUEST_DEQUEUED
+    level = DEBUG
+
+    node_id: str
+
+
+@dataclass(frozen=True)
 class RequestForwarded(_RequestNotification):
     """La richiesta parte dalla regione di origine verso la destinazione."""
 

@@ -290,6 +290,7 @@ class Simulation:
     def _request_dequeued(self, request: Request) -> None:
         """Notifica l'ammissione della richiesta uscita dalla FIFO."""
         queue_wait = self._ctx.engine.now - request.region_arrival_time
+        self._ctx.observer.notify_request_dequeued(request)
         self._ctx.observer.notify_request_accepted(request, queue_wait_s=queue_wait)
         self._schedule_execution(request)
 

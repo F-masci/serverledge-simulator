@@ -419,6 +419,11 @@ class SimulationTest(unittest.TestCase):
         snapshot = simulation.metrics_snapshot()
         admitted, = [event for event in notifications if event.type is NotificationType.REQUEST_ACCEPTED
                      and event.request_id == queued.request_id]
+        dequeued, = [event for event in notifications if event.type is NotificationType.REQUEST_DEQUEUED]
+        self.assertEqual(dequeued.request_id, queued.request_id)
+        self.assertEqual((dequeued.sim_time_s, dequeued.region, dequeued.ring_id, dequeued.node_id),
+                         (2.5, 'default', 'edge', 'n1'))
+        self.assertLess(notifications.index(dequeued), notifications.index(admitted))
         self.assertEqual((admitted.queue_wait_s, admitted.warm), (1.5, True))
         totals = snapshot['total']
         self.assertEqual((totals['arrivals'], totals['queued'], totals['waiting'], totals['accepted']), (3, 1, 0, 2))

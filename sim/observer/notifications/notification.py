@@ -20,6 +20,7 @@ class NotificationType(StrEnum):
     SIMULATION_ERROR = 'simulation.error'
     REQUEST_ARRIVED = 'request.arrived'
     REQUEST_QUEUED = 'request.queued'
+    REQUEST_DEQUEUED = 'request.dequeued'
     REQUEST_FORWARDED = 'request.forwarded'
     REQUEST_DELIVERED = 'request.delivered'
     REQUEST_ACCEPTED = 'request.accepted'

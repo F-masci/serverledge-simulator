@@ -100,8 +100,9 @@ class Request:
     @property
     def region(self) -> 'Region | None':
         region = self._region
-        if region is None:
-            region = self.infrastructure.region
+        node = self.node
+        if region is None and node is not None:
+            region = node.region
         return region
 
     ### Request State ###
@@ -165,7 +166,6 @@ class Request:
         if self._status is not RequestStatus.IN_TRANSIT:
             self.ensure_created()
         self._region = region
-        self.enter_infrastructure(region.infrastructure)
         if self._entry_region is None:
             self._entry_region = region
         self._region_arrival_time = now
@@ -175,7 +175,6 @@ class Request:
     def start_transfer(self, region: 'Region', return_delay: float) -> None:
         self.ensure_created()
         self._region = region
-        self.enter_infrastructure(region.infrastructure)
         self._return_delay = return_delay
         self._handle_change_status(RequestStatus.IN_TRANSIT, None)
 
@@ -327,7 +326,7 @@ class Request:
             'rejection_reason': self._rejection_reason,
             'entry_region': self._entry_region.name if self._entry_region is not None else None,
             'region': self._region.name if self._region is not None else None,
-            'ring_id': self._ring.id if self._ring is not None else None,
+            'ring_id': self.ring.id if node is not None else None,
             'offloaded_from_node_id': self._offloaded_from.id.key if self._offloaded_from is not None else None,
         }
 

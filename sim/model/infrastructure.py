@@ -118,7 +118,6 @@ class Infrastructure:
     ) -> Node | None:
         """Riceve un'invocazione al bilanciatore oppure direttamente a un nodo."""
         request.ensure_created()
-        request.enter_infrastructure(self)
         if node is None:
             destination = self._route(request)
         else:
@@ -129,7 +128,6 @@ class Infrastructure:
         return destination
 
     def _route(self, request: Request) -> Node | None:
-        request.select_ring(None)
         rings = self._load_balancer.candidate_rings(request, self._rings.values())
         for ring in rings:
             destination = ring.submit(request, schedule=self._schedule)
@@ -142,10 +140,8 @@ class Infrastructure:
     def _submit_to_node(self, request: Request, node: Node) -> Node | None:
         ring = node.ring
         if ring is None or ring.infrastructure is not self or node not in ring:
-            request.select_ring(None)
             request.reject('no_destination')
             return None
-        request.select_ring(ring)
         return self._schedule(request, node)
 
     def _schedule(self, request: Request, node: Node) -> Node | None:
