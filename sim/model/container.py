@@ -42,8 +42,9 @@ class DockerContainer:
         self.on_busy: Callable[[DockerContainer], None] | None = None
         self.on_idle: Callable[[DockerContainer], None] | None = None
         self.on_destroyed: Callable[[DockerContainer], None] | None = None
-        
         self.on_state_changed: Callable[[DockerContainer, ContainerState, ContainerState], None] | None = None
+
+        self.on_acquire: Callable[[DockerContainer], None] | None = None
 
     ### Identification ###
 
@@ -145,9 +146,9 @@ class DockerContainer:
         self._handle_change_status(state, self.on_created)
 
         # Dopo la creazione, notifica anche lo stato operativo iniziale.
-        if self.on_idle is not None and self._state is ContainerState.IDLE:
+        if self.on_idle is not None and self.is_idle:
             self.on_idle(self)
-        if self.on_busy is not None and self._state is ContainerState.BUSY:
+        if self.on_busy is not None and self.is_busy:
             self.on_busy(self)
 
     def acquire(self) -> None:
@@ -158,6 +159,8 @@ class DockerContainer:
         # Ogni acquisizione notifica on_busy, anche con altre richieste attive.
         self._requests_count += 1
         self._expiration_time = None
+        if self.on_acquire is not None:
+            self.on_acquire(self)
         self._handle_change_status(ContainerState.BUSY, self.on_busy)
 
     def complete(self, now: float, timeout: float) -> None:

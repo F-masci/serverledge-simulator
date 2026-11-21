@@ -4,9 +4,10 @@ I contatori busy/warm rappresentano prenotazioni, non consumo fisico misurato.
 """
 from __future__ import annotations
 from .request import Request
-from sim.utils.validation import finite_time, integer
+from sim.utils.validation import finite_time, integer, nonnegative_number
 
 from dataclasses import dataclass
+from functools import partial
 from itertools import count
 from types import MappingProxyType
 from typing import TYPE_CHECKING
@@ -86,7 +87,7 @@ class Resources:
             self._busy_pool_used_mem += function.memory_mb
             self._used_cpus += function.cpu_demand
 
-    def _release(self, function: Function, *, idle: bool) -> None:
+    def release(self, function: Function, *, idle: bool) -> None:
         if idle:
             self._warm_pool_used_mem -= function.memory_mb
         else:
@@ -94,11 +95,11 @@ class Resources:
             self._used_cpus -= function.cpu_demand
 
     def activate(self, function: Function) -> None:
-        self._release(function, idle=True)
+        self.release(function, idle=True)
         self.reserve(function, idle=False)
 
     def deactivate(self, function: Function) -> None:
-        self._release(function, idle=False)
+        self.release(function, idle=False)
         self.reserve(function, idle=True)
 
 
@@ -121,24 +122,36 @@ class Node:
         queue_capacity: int = 0,
         ring: 'ArchitectureRing | None' = None,
     ) -> None:
-        self._ring = ring
-        self._idle_timeout = finite_time(idle_timeout, 'node.idle_timeout')
-        if self._idle_timeout < 0:
-            raise ValueError('node.idle_timeout deve essere non negativo')
+        # Identificativo univoco del nodo
         self._id = NodeID(
             key=name,
             arch=arch,
             machine_tag=arch if machine_tag is None else machine_tag,
         )
+        # Infrastruttura
+        self._ring = ring
+
+        # Risorse locali e pool di container
         self._resources = Resources(total_memory=memory, total_cpus=cpus)
         self._pools: dict[str, ContainerPool] = {}
         self._pending: dict[DockerContainer, bool] = {}
+        self._container_ids = count(1)
+        self._idle_timeout = nonnegative_number(idle_timeout, 'node.idle_timeout')
+
+        # Coda FIFO per le richieste in attesa di ammissione
         self._queue_capacity = max(0, integer(queue_capacity, 'queue_capacity'))
         self._queue: deque[Request] = deque()
-        self._container_ids = count(1)
-        self.on_container_state_change: Callable[[Node, DockerContainer, ContainerState | None], None] | None = None
-        self.on_dequeue: Callable[[Request], None] | None = None
-        self.on_container_idle: Callable[[Node, DockerContainer], None] | None = None
+
+        ### Callback ###
+        self.on_container_created: Callable[[Node, DockerContainer], None] | None = None
+        self.on_container_acquired: Callable[[Node, DockerContainer], None] | None = None
+        self.on_container_destroyed: Callable[[Node, DockerContainer], None] | None = None
+
+        self.on_request_submitted: Callable[[Node, Request], None] | None = None
+        self.on_request_accepted: Callable[[Node, Request], None] | None = None
+        self.on_request_rejected: Callable[[Node, Request], None] | None = None
+        self.on_request_completed: Callable[[Node, Request], None] | None = None
+        self.on_request_dequeued: Callable[[Node, Request], None] | None = None
 
     ### Identification ###
 
@@ -199,7 +212,7 @@ class Node:
     ### Internal state management ###
     #################################
 
-    ## Container selection ##
+    ## Container management ##
 
     def acquire(self, function: Function) -> DockerContainer | None:
         """Riusa un container o riserva una creazione; None indica indisponibilità.
@@ -233,7 +246,6 @@ class Node:
             container.acquire()
             self.resources.activate(function)
             pool.add(container)
-            self._notify_container_state(container, ContainerState.IDLE)
 
             return container
 
@@ -266,8 +278,8 @@ class Node:
         # Se le risorse sono sufficienti, si riserva la creazione del container e si aggiorna lo stato.
         self.resources.reserve(function, idle=idle)
         container = DockerContainer(f'{self.id.key}/c{next(self._container_ids)}', function, node=self)
+        self._bind_container_callbacks(container)
         self._pending[container] = idle
-        self._notify_container_state(container, None)
         return container
 
     def _free_memory(self, to_free: int) -> int:
@@ -299,46 +311,59 @@ class Node:
         return reclaimable
 
     def creation_succeeded(self, container: DockerContainer, now: float) -> None:
+        """Segnala che la creazione del container è riuscita e lo aggiunge al pool."""
+        if container not in self._pending:
+            raise ValueError('Container non in pending')
+
+        # Se la creazione è riuscita, si rimuove il container dalla lista
+        # pending e lo si aggiunge al pool.
         idle = self._pending.pop(container)
         container.created(idle=idle, now=now, timeout=self._idle_timeout)
-        self._get_pool(container.function).add(container)
-        self._notify_container_state(container, ContainerState.CREATING)
-        if idle:
-            self._notify_container_idle(container)
+        pool = self._get_pool(container.function)
+        pool.add(container)
 
     def complete(self, container: DockerContainer, now: float) -> None:
-        pool = self._pools.get(container.function.name)
+        """Segnala il completamento di una richiesta e aggiorna lo stato del container."""
+
+        # Se il container non è attivo o non appartiene al pool, si solleva un'eccezione.
+        pool = self._get_pool(container.function)
         if pool is None or container not in pool.busy:
             raise ValueError('Container non attivo su questo nodo')
+
+        # Segna il completamento della richiesta e aggiorna lo stato del container.
         container.complete(now, self._idle_timeout)
-        if container.state is ContainerState.IDLE:
+
+        # Se il container è tornato idle, lo si sposta dal pool busy
+        # al pool idle e si aggiornano le prenotazioni.
+        #
+        # TODO: spostare la logica di inversione della lista nell callback on_idle del container
+        if container.is_idle:
             pool.remove_busy(container)
             pool.add(container)
             self.resources.deactivate(container.function)
-            self._notify_container_state(container, ContainerState.BUSY)
-            self._notify_container_idle(container)
+
+        # Dopo il completamento, si tenta di ammettere le richieste in attesa nella coda FIFO.
         self.dispatch_waiting()
-
-    def _notify_container_state(self, container: DockerContainer, previous: ContainerState | None) -> None:
-        if self.on_container_state_change is not None:
-            self.on_container_state_change(self, container, previous)
-
-    def _notify_container_idle(self, container: DockerContainer) -> None:
-        if self.on_container_idle is not None:
-            self.on_container_idle(self, container)
-
-    def _destroy_idle(self, container: DockerContainer) -> None:
-        pool = self._pools[container.function.name]
-        container.destroy()
-        pool.remove_idle(container)
-        self.resources._release(container.function, idle=True)
-        self._notify_container_state(container, ContainerState.IDLE)
 
     def expire(self, now: float, *, container: DockerContainer) -> None:
         """Rimuove il container indicato se è ancora nel pool idle ed è scaduto."""
-        pool = self._pools.get(container.function.name)
-        if pool is not None and container.is_expired(now) and container in pool.idle:
-            self._destroy_idle(container)
+        pool = self._get_pool(container.function)
+
+        # Se il container non è scaduto o non è nel pool idle, non si fa nulla.
+        if not container.is_expired(now): return
+        if container not in pool.idle: return
+
+        # Se il container è scaduto e nel pool idle, lo si distrugge e si aggiornano le prenotazioni.
+        self._destroy_idle(container)
+
+    def _destroy_idle(self, container: DockerContainer) -> None:
+        """Rimuove un container idle dal pool e aggiorna le prenotazioni."""
+        pool = self._get_pool(container.function)
+        container.destroy()
+        pool.remove_idle(container)
+        self.resources.release(container.function, idle=True)
+
+    ## Request management ##
 
     def submit(self, request: Request, *, reject_on_failure: bool = True) -> bool:
         """Tenta l'ammissione locale dopo la selezione di un ring compatibile.
@@ -346,39 +371,78 @@ class Node:
         Riusa un busy sotto il limite di concorrenza, poi un idle, oppure
         prenota una nuova creazione. Durante il routing, un tentativo fallito
         lascia la richiesta disponibile per il candidato successivo.
-        Una creazione resta CREATING fino
-        alla notifica esplicita del suo esito, senza esecuzione automatica.
+        Una creazione resta CREATING fino alla notifica esplicita del suo esito,
+        senza esecuzione automatica.
         """
         request.ensure_created()
         container = self.acquire(request.function)
         if container is None:
-            return self.enqueue_or_reject(request) if reject_on_failure else False
+            return self.enqueue(request, reject_on_failure=reject_on_failure)
         request.accept_on_container(container=container)
         return True
 
-    def enqueue_or_reject(self, request: Request) -> bool:
+    def enqueue(self, request: Request, *, reject_on_failure: bool = True) -> bool:
         """Mette in attesa sul nodo destinatario se resta posto nella FIFO."""
+
+        # Se la coda è piena, si rifiuta la richiesta se richiesto.
         if len(self._queue) >= self._queue_capacity:
-            request.reject('out_of_resources', node=self)
+            if reject_on_failure:
+                request.reject('out_of_resources', node=self)
             return False
+
+        # Se c'è posto nella coda, si registra la richiesta in attesa e si notifica l'accodamento.
         request.enqueue(self)
         self._queue.append(request)
+
         return True
 
     def dispatch_waiting(self) -> None:
-        """Dopo un completamento ammette le richieste finché la testa può partire."""
+        """Tenta di ammettere le richieste in attesa nella coda FIFO."""
         while self._queue:
+            # Si tenta di ammettere la prima richiesta in coda; se non ci sono risorse, si esce.
             request = self._queue[0]
             container = self.acquire(request.function)
             if container is None:
                 break
-            self._dequeue(container)
 
-    def _dequeue(self, container: DockerContainer) -> None:
-        request = self._queue.popleft()
-        request.accept_on_container(self, container)
-        if self.on_dequeue is not None:
-            self.on_dequeue(request)
+            # Se la richiesta può essere ammesse, si rimuove dalla coda e si notifica l'ammissione.
+            request = self._queue.popleft()
+            request.accept_on_container(container)
+
+    ## Callback handling ##
+
+    def _bind_container_callbacks(self, container: DockerContainer) -> None:
+        """Associa le callback del nodo a un container."""
+        on_created = self.on_container_created
+        on_acquire = self.on_container_acquired
+        on_destroyed = self.on_container_destroyed
+
+        if on_created is not None:
+            container.on_created = partial(on_created, self)
+        if on_acquire is not None:
+            container.on_acquire = partial(on_acquire, self)
+        if on_destroyed is not None:
+            container.on_destroyed = partial(on_destroyed, self)
+
+    def _bind_request_callbacks(self, request: Request) -> None:
+        """Associa le callback del nodo a una richiesta."""
+        on_submitted = self.on_request_submitted
+        on_accepted = self.on_request_accepted
+        on_rejected = self.on_request_rejected
+        on_completed = self.on_request_completed
+        on_dequeued = self.on_request_dequeued
+
+        if on_submitted is not None:
+            request.on_submitted = partial(on_submitted, self)
+        if on_accepted is not None:
+            request.on_accepted = partial(on_accepted, self)
+        if on_rejected is not None:
+            request.on_rejected = partial(on_rejected, self)
+        if on_completed is not None:
+            request.on_completed = partial(on_completed, self)
+        if on_dequeued is not None:
+            request.on_dequeued = partial(on_dequeued, self)
+
 
     def __repr__(self) -> str:
         return self.id.key
