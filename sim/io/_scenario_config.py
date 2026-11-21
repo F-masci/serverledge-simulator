@@ -231,6 +231,8 @@ class _InfrastructureConfig:
 
 @dataclass(frozen=True)
 class _RegionConfig:
+    """Topologia, modalità di esecuzione e latenze di una regione."""
+
     infrastructure: _InfrastructureConfig | None
     service_time_s: float = 0.0
     offload_latency_s: float = 0.0
@@ -239,12 +241,18 @@ class _RegionConfig:
 
     @classmethod
     def parse(cls, name: str, data: object) -> '_RegionConfig':
+        """Parse della configurazione di una regione."""
+
+        # Controlla che la tabella contenga solo i campi ammessi.
         prefix = f'regions.{name}'
-        if not isinstance(data, Mapping) or data.keys() - {
+        allowed = {
             'mode', 'infrastructure', 'service_time_s', 'offload_latency_s', 'offload_latency_by_source_s',
             'has_load_balancer',
-        }:
+        }
+        if not isinstance(data, Mapping) or data.keys() - allowed:
             raise ValueError(f'Configurazione non valida per {prefix}')
+
+        # Legge la latenza di default e le latenze per regione di origine.
         latency = nonnegative_number(data.get('offload_latency_s', 0), f'{prefix}.offload_latency_s')
         by_source_field = f'{prefix}.offload_latency_by_source_s'
         by_source = data.get('offload_latency_by_source_s', {})
@@ -254,22 +262,33 @@ class _RegionConfig:
         for source, duration in by_source.items():
             source = nonempty_string(source, by_source_field)
             latency_by_source[source] = nonnegative_number(duration, f'{by_source_field}.{source}')
-        latencies = MappingProxyType(latency_by_source)
+
+        # Valida i campi specifici della modalità di esecuzione.
         mode = data.get('mode', 'simulated')
         if mode == 'simulated':
             if 'service_time_s' in data:
                 raise ValueError(f'{prefix}.service_time_s richiede mode = "always_succeeds"')
-            return cls(_InfrastructureConfig.parse(data.get('infrastructure')), offload_latency_s=latency,
-                       offload_latency_by_source_s=latencies,
-                       has_load_balancer=_boolean(data.get('has_load_balancer', True), f'{prefix}.has_load_balancer'))
-        if mode == 'always_succeeds':
+            infrastructure = _InfrastructureConfig.parse(data.get('infrastructure'))
+            service_time = 0.0
+            has_load_balancer = _boolean(data.get('has_load_balancer', True), f'{prefix}.has_load_balancer')
+        elif mode == 'always_succeeds':
             if 'infrastructure' in data:
                 raise ValueError(f'{prefix}.infrastructure richiede mode = "simulated"')
             if 'has_load_balancer' in data:
                 raise ValueError(f'{prefix}.has_load_balancer richiede mode = "simulated"')
-            duration = nonnegative_number(data.get('service_time_s', 0), f'{prefix}.service_time_s')
-            return cls(None, duration, latency, latencies)
-        raise ValueError(f'{prefix}.mode deve essere simulated o always_succeeds')
+            infrastructure = None
+            service_time = nonnegative_number(data.get('service_time_s', 0), f'{prefix}.service_time_s')
+            has_load_balancer = True
+        else:
+            raise ValueError(f'{prefix}.mode deve essere simulated o always_succeeds')
+
+        return cls(
+            infrastructure=infrastructure,
+            service_time_s=service_time,
+            offload_latency_s=latency,
+            offload_latency_by_source_s=MappingProxyType(latency_by_source),
+            has_load_balancer=has_load_balancer,
+        )
 
 
 @dataclass(frozen=True)

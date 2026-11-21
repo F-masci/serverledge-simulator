@@ -65,29 +65,31 @@ class Scenario:
         registry = self._register_functions(functions)
         object.__setattr__(self, 'function_registry', MappingProxyType(registry))
 
-    @property
-    def infrastructure(self) -> _InfrastructureConfig | None:
-        return self.regions[self.primary_region].infrastructure
-
     def _configure_regions(
         self, regions: Mapping[str, object] | None, primary_region: str | None,
         infrastructure: Mapping[str, object] | None, invocation: _InvocationConfig,
     ) -> None:
+        """Valida la topologia regionale e registra la configurazione di ingresso."""
+
+        # Se manca la sezione regions, usa l'infrastruttura come unica regione.
         if primary_region is not None:
             primary_region = nonempty_string(primary_region, 'primary_region')
         if regions is None:
             primary = primary_region or 'default'
-            configured = {primary: _RegionConfig(_InfrastructureConfig.parse(infrastructure))}
+            infrastructure_config = _InfrastructureConfig.parse(infrastructure)
+            configured = {primary: _RegionConfig(infrastructure=infrastructure_config)}
         else:
             if infrastructure is not None:
                 raise ValueError('Con regions, dichiarare infrastructure dentro ogni regione')
             if not isinstance(regions, Mapping) or not regions:
                 raise ValueError('regions deve essere una tabella di regioni non vuota')
-            configured = {
-                nonempty_string(name, 'regions (nome)'): _RegionConfig.parse(name, data)
-                for name, data in regions.items()
-            }
+            configured = {}
+            for name, definition in regions.items():
+                name = nonempty_string(name, 'regions (nome)')
+                configured[name] = _RegionConfig.parse(name, definition)
             primary = primary_region or next(iter(configured))
+
+        # Verifica la regione primaria e la regione di ingresso delle invocazioni.
         if primary not in configured:
             raise ValueError(f'primary_region sconosciuta: {primary}')
 
@@ -97,6 +99,7 @@ class Scenario:
         if configured[entry].infrastructure is None and invocation.entry_node:
             raise ValueError(f'La regione {entry} accetta invocazioni a livello di regione')
 
+        # Le latenze per origine e le destinazioni remote devono indicare altre regioni censite.
         for name, region in configured.items():
             for source in region.offload_latency_by_source_s:
                 if source not in configured or source == name:
@@ -105,8 +108,11 @@ class Scenario:
                 continue
             for ring in region.infrastructure.rings:
                 for node in ring.nodes:
-                    if node.remote_region is not None and (node.remote_region not in configured or node.remote_region == name):
-                        raise ValueError(f'node.remote_region deve indicare un’altra regione censita: {node.remote_region}')
+                    remote = node.remote_region
+                    if remote is not None and (remote not in configured or remote == name):
+                        raise ValueError(f'node.remote_region deve indicare un’altra regione censita: {remote}')
+
+        # Espone la configurazione regionale in sola lettura.
         object.__setattr__(self, 'primary_region', primary)
         object.__setattr__(self, 'regions', MappingProxyType(configured))
         object.__setattr__(self, 'invocation', invocation)

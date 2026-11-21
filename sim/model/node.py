@@ -9,6 +9,7 @@ from sim.utils.validation import finite_time, integer, nonnegative_number
 from dataclasses import dataclass
 from functools import partial
 from itertools import count
+import json
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 from collections import deque
@@ -436,6 +437,43 @@ class Node:
             container.on_acquire = partial(on_acquire, self)
         if on_destroyed is not None:
             container.on_destroyed = partial(on_destroyed, self)
+
+    #####################
+    ### Serialization ###
+    #####################
+
+    def to_dict(self) -> dict:
+        """Restituisce lo stato locale del nodo in un formato serializzabile."""
+        resources = self.resources
+        ring = self._ring
+        return {
+            'id': self.id.key,
+            'arch': self.id.arch,
+            'machine_tag': self.id.machine_tag,
+            'ring_id': ring.id if ring is not None else None,
+            'idle_timeout_s': self._idle_timeout,
+            'resources': {
+                'total_memory_mb': resources.total_memory,
+                'busy_pool_used_memory_mb': resources.busy_pool_used_mem,
+                'warm_pool_used_memory_mb': resources.warm_pool_used_mem,
+                'free_memory_mb': resources.free_memory,
+                'available_memory_mb': resources.available_memory,
+                'total_cpus': resources.total_cpus,
+                'used_cpus': resources.used_cpus,
+                'available_cpus': resources.available_cpus,
+            },
+            'pools': {name: pool.to_dict() for name, pool in self._pools.items()},
+            'pending': [
+                {**container.to_dict(), 'prewarm': idle}
+                for container, idle in self._pending.items()
+            ],
+            'queue_capacity': self._queue_capacity,
+            'queue': [request.id for request in self._queue],
+        }
+
+    def to_json(self) -> str:
+        """Serializza il nodo per la stampa o l'esportazione."""
+        return json.dumps(self.to_dict(), ensure_ascii=False, allow_nan=False)
 
     def __repr__(self) -> str:
         return self.id.key
