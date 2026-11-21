@@ -250,7 +250,7 @@ class Simulation:
         """Associa le callback per gli eventi dei nodi."""
         node.on_container_state_change = partial(self._ctx.observer.notify_container_state, region, ring_id)
         node.on_container_idle = self._schedule_container_cleanup
-        node.on_dequeue = self._request_dequeued
+        node.on_request_dequeued = self._request_dequeued
 
     def _final_statistics(self) -> FinalStatistics:
         """Prepara la notifica dopo il completamento di run()."""
@@ -287,7 +287,7 @@ class Simulation:
 
             self._ctx.engine.schedule_after(cold_start_time, ContainerReadyEvent(request, ctx=self._ctx),)
 
-    def _request_dequeued(self, request: Request) -> None:
+    def _request_dequeued(self, node: Node, request: Request) -> None:
         """Notifica l'ammissione della richiesta uscita dalla FIFO."""
         queue_wait = self._ctx.engine.now - request.region_arrival_time
         self._ctx.observer.notify_request_dequeued(request)

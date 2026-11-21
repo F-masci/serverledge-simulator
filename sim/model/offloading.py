@@ -67,7 +67,7 @@ class DefaultScheduler(OffloadingScheduler):
     def schedule(self, request: Request, node: Node) -> None:
         """Consegna la richiesta al nodo se l'architettura è compatibile."""
         if request.function.supports_arch(node.id.arch):
-            node.submit(request)
+            node.submit(request, allow_queue=True)
         else:
             request.reject('out_of_resources', node=node)
 
@@ -84,7 +84,7 @@ class EdgeOnlyScheduler(OffloadingScheduler):
             if not self._settings.fallback_local:
                 request.reject('out_of_resources', node=node)
                 return None
-        if not request.function.supports_arch(node.id.arch) or not node.submit(request, reject_on_failure=False):
+        if not request.function.supports_arch(node.id.arch) or not node.submit(request, allow_queue=False, reject_on_failure=False):
             request.reject('out_of_resources', node=node)
         return None
 
@@ -121,7 +121,7 @@ class EdgeCloudScheduler(CloudOnlyScheduler):
 
     def schedule(self, request: Request, node: Node) -> 'Region | None':
         """Tenta l'ammissione locale immediata e applica la policy cloud se fallisce."""
-        if request.function.supports_arch(node.id.arch) and node.submit(request, reject_on_failure=False):
+        if request.function.supports_arch(node.id.arch) and node.submit(request, allow_queue=False, reject_on_failure=False):
             return None
         return super().schedule(request, node)
 

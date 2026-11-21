@@ -45,6 +45,19 @@ class OffloadingTest(unittest.TestCase):
         self.assertIs(self.infrastructure.submit(fallback, node=origin), origin)
         self.assertIsNone(fallback.to_dict()['offloaded_from_node_id'])
 
+    def test_edgeonly_local_fallback_does_not_use_the_fifo(self):
+        origin = self.node('origin', queue_capacity=1)
+        self.infrastructure.configure_scheduler(origin, NodeScheduling(
+            SchedulingPolicy.EDGE_ONLY, fallback_local=True,
+        ))
+
+        active = Request(self.function)
+        fallback = Request(self.function, can_offload=True)
+        self.assertIs(self.infrastructure.submit(active, node=origin), origin)
+        self.assertIsNone(self.infrastructure.submit(fallback, node=origin))
+        self.assertIs(fallback.status, RequestStatus.REJECTED)
+        self.assertIs(fallback.node, origin)
+
     def test_edgeonly_uses_current_memory_for_each_invocation(self):
         origin = self.node('origin', queue_capacity=1)
         small = self.node('small', memory=256)
@@ -94,6 +107,7 @@ class OffloadingTest(unittest.TestCase):
         )
         remote = Request(self.function, can_offload=True)
         self.assertIs(scheduler.schedule(remote, edge), cloud)
+        self.assertIs(remote.status, RequestStatus.CREATED)
 
     def test_cloudonly_rejects_without_permission_or_remote_region(self):
         origin = self.node('origin')

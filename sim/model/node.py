@@ -362,7 +362,9 @@ class Node:
 
     ## Request management ##
 
-    def submit(self, request: Request, *, reject_on_failure: bool = True) -> bool:
+    def submit(
+        self, request: Request, *, allow_queue: bool = True, reject_on_failure: bool = True,
+    ) -> bool:
         """Tenta l'ammissione locale dopo la selezione di un ring compatibile.
 
         Riusa un busy sotto il limite di concorrenza, poi un idle, oppure
@@ -377,10 +379,14 @@ class Node:
         if self.on_request_submitted is not None:
             self.on_request_submitted(self, request)
 
-        # Si tenta di acquisire un container per la funzione richiesta; se non ci sono risorse, si accoda la richiesta.
+        # Si tenta di acquisire un container. La policy decide se usare la FIFO.
         container = self.acquire(request.function)
         if container is None:
-            return self.enqueue(request, reject_on_failure=reject_on_failure)
+            if allow_queue:
+                return self.enqueue(request, reject_on_failure=reject_on_failure)
+            if reject_on_failure:
+                request.reject('out_of_resources', node=self)
+            return False
 
         # Se l'ammissione ha successo, si notifica l'accettazione della richiesta sul container.
         request.accept_on_container(container=container)
