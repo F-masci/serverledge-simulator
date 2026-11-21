@@ -4,6 +4,8 @@ from bisect import bisect_left
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING
 
+from pip._internal.resolution.resolvelib import candidates
+
 from .function import Function
 from .node import Node
 from .request import Request
@@ -22,14 +24,19 @@ class ArchitectureRing:
     """
 
     def __init__(
-        self, ring_id: str, arch: str, memory: int, cpus: float, replicas: int = 128, *,
-        infrastructure: 'Infrastructure | None' = None,
+        self, ring_id: str, arch: str, memory: int, cpus: float, infrastructure: Infrastructure, replicas: int = 128
     ) -> None:
+        # Identificatore univoco dell'anello
         self._id = nonempty_string(ring_id, 'ring_id')
-        self._infrastructure = infrastructure
+
+        # Capacità comuni a tutti i nodi dell'anello
         self._arch = nonempty_string(arch, 'arch')
         self._memory = positive_integer(memory, 'memory')
         self._cpus = positive_number(cpus, 'cpus')
+
+        # Riferimento all'infrastruttura che possiede l'anello
+        self._infrastructure = infrastructure
+        # Lista dei nodi fisici registrati nell'anello
         self._nodes: list[Node] = []
         self._replicas = positive_integer(replicas, 'replicas')
         self._positions: list[int] = []
@@ -38,11 +45,19 @@ class ArchitectureRing:
         ### Callback ###
         self.on_node_created: Callable[[ArchitectureRing, Node], None] | None = None
         self.on_node_removed: Callable[[ArchitectureRing, Node], None] | None = None
-        self.on_request_submitted: Callable[[ArchitectureRing, Request, Node | None], None] | None = None
+
+    ### Identification ###
 
     @property
     def id(self) -> str:
         return self._id
+
+    @property
+    def arch(self) -> str:
+        """Restituisce l'architettura comune ai nodi dell'anello."""
+        return self._arch
+
+    ### Infrastructure ###
 
     @property
     def infrastructure(self) -> 'Infrastructure':
@@ -53,30 +68,19 @@ class ArchitectureRing:
     def region(self) -> 'Region':
         return self.infrastructure.region
 
-    @property
-    def memory(self) -> int:
-        """Capacità RAM comune a tutti i nodi, in unità da 2**20 byte."""
-        return self._memory
+    @staticmethod
+    def _hash(key: str) -> int:
+        """Calcola l'hash FNV-1a sui byte UTF-8 con aritmetica a 32 bit senza segno."""
+        value = 2166136261
+        for byte in key.encode('utf-8'):
+            value = ((value ^ byte) * 16777619) & 0xFFFFFFFF
+        return value
 
-    @property
-    def cpus(self) -> float:
-        """Capacità CPU comune, distinta dalle prenotazioni dei singoli nodi."""
-        return self._cpus
+    #################################
+    ### Internal state management ###
+    #################################
 
-    @property
-    def arch(self) -> str:
-        """Identificatore dell'architettura comune a tutti i nodi."""
-        return self._arch
-
-    @property
-    def nodes(self) -> tuple[Node, ...]:
-        """Snapshot dei riferimenti, senza esporre la lista interna modificabile."""
-        return tuple(self._nodes)
-
-    @property
-    def replicas(self) -> int:
-        """Numero di repliche virtuali per nodo, usate per il consistent hashing."""
-        return self._replicas
+    ## Infra management ##
 
     def create_node(
         self, name: str, machine_tag: str | None = None,
@@ -85,11 +89,11 @@ class ArchitectureRing:
         """Crea un nodo con le capacità e l'architettura dell'anello."""
         name = nonempty_string(name, 'name')
 
-        if any(node.id.key == name for node in self._nodes):
+        if any(node.key == name for node in self._nodes):
             raise ValueError(f'Nodo già presente nell\'anello: {name}')
 
         node = Node(
-            name, self.memory, self.cpus, self.arch, machine_tag,
+            name, self._memory, self._cpus, self._arch, machine_tag,
             idle_timeout=idle_timeout, queue_capacity=queue_capacity, ring=self,
         )
 
@@ -97,14 +101,16 @@ class ArchitectureRing:
         self._register_replicas(node)
         self._positions.sort()
         self._nodes.append(node)
+
         if self.on_node_created is not None:
             self.on_node_created(self, node)
+
         return node
 
     def remove_node(self, name: str) -> Node:
         """Rimuove un nodo per nome dal routing e restituisce il nodo rimosso."""
         name = nonempty_string(name, 'name')
-        node = next((node for node in self._nodes if node.id.key == name), None)
+        node = next((node for node in self._nodes if node.key == name), None)
         if node is None:
             raise ValueError(f'Nodo non trovato nell\'anello: {name}')
 
@@ -121,40 +127,18 @@ class ArchitectureRing:
         node._ring = None
         if self.on_node_removed is not None:
             self.on_node_removed(self, node)
+
         return node
 
     def select_node(self, function: Function) -> Node | None:
         """Restituisce il primo candidato del consistent hashing."""
         return next(self._candidates(function), None)
 
-    def submit(
-        self, request: Request, *,
-        schedule: Callable[[Request, Node], Node | None] | None = None,
-    ) -> Node | None:
-        """Seleziona un nodo idoneo con l'hash e gli consegna l'invocazione."""
-        request.ensure_created()
-        function = request.function
-        # TODO: separare le risorse correnti dalla vista del proxy, come la
-        # NodeMetricCache Go aggiornata dai polling e dalle risposte dei nodi.
-        node = next((
-            candidate for candidate in self._candidates(function)
-            if candidate.resources.available_memory >= function.memory_mb
-            and candidate.resources.available_cpus >= function.cpu_demand
-        ), None)
-        if node is None:
-            return None
-
-        if schedule is not None:
-            destination = schedule(request, node)
-        else:
-            destination = node if node.submit(request) else None
-        if self.on_request_submitted is not None:
-            self.on_request_submitted(self, request, destination)
-        return destination
-
     def _candidates(self, function: Function) -> Iterator[Node]:
         """Visita i nodi fisici una sola volta, a partire dal successore dell'hash."""
         matching = None
+
+        # Filtra i nodi compatibili con il tag della funzione, se presente.
         if function.tag_pattern:
             matching = {
                 node for node in self._nodes
@@ -162,8 +146,12 @@ class ArchitectureRing:
             }
             if not matching:
                 return
+
+
         target_count = len(self._nodes) if matching is None else len(matching)
         size = len(self._positions)
+
+        # Trova la posizione iniziale dell'hash della funzione e visita i nodi in ordine circolare.
         start = bisect_left(self._positions, self._hash(function.name))
         seen: set[Node] = set()
         for offset in range(size):
@@ -192,19 +180,26 @@ class ArchitectureRing:
         for index in range(self._replicas):
             yield self._hash(f'{node.id.key}#{index}')
 
-    @staticmethod
-    def _hash(key: str) -> int:
-        """Calcola l'hash FNV-1a sui byte UTF-8 con aritmetica a 32 bit senza segno."""
-        value = 2166136261
-        for byte in key.encode('utf-8'):
-            value = ((value ^ byte) * 16777619) & 0xFFFFFFFF
-        return value
+    ## Request management ##
+
+    def submit(self, request: Request) -> Node | None:
+        """Seleziona un nodo idoneo con l'hash e gli consegna l'invocazione."""
+        request.ensure_created()
+        function = request.function
+
+        # TODO: separare le risorse correnti dalla vista del proxy, come la NodeMetricCache Go aggiornata dai polling e dalle risposte dei nodi.
+        node = next((c for c in self._candidates(function) if c.can_allocate(function)), None)
+        if node is None:
+            return None
+
+        destination = node.receive(request)
+        return destination
 
     def __len__(self) -> int:
         return len(self._nodes)
 
     def __iter__(self) -> Iterator[Node]:
-        return iter(self.nodes)
+        return iter(self._nodes)
 
     def __contains__(self, node: object) -> bool:
         return node in self._nodes

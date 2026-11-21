@@ -253,6 +253,8 @@ class Simulation:
         self._ctx.observer.notify_request_delivered(request)
         region.submit(request, now=now, node=node)
         self._notify_request_submission(request)
+        if request.status is RequestStatus.ACCEPTED:
+            self._schedule_execution(request)
 
     def _bind_node_callbacks(self, node: Node, region: str, ring_id: str) -> None:
         """Associa le callback per gli eventi dei nodi."""

@@ -170,7 +170,8 @@ name = "edge-2"
             path.write_text(scenario_data, encoding='utf-8')
             simulation = Simulation(Scenario.load(path))
         requests = []
-        simulation._ctx.infrastructure.on_request_submitted = lambda _, request, node: requests.append(request)
+        infrastructure = simulation.regions['default'].infrastructure
+        infrastructure.on_request_submitted = lambda _, request, node: requests.append(request)
 
         statistics = simulation.run(arrivals=1)
         accepted, = requests

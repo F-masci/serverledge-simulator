@@ -3,7 +3,7 @@
 I contatori busy/warm rappresentano prenotazioni, non consumo fisico misurato.
 """
 from __future__ import annotations
-from .request import Request
+from .request import Request, RequestStatus
 from sim.utils.validation import finite_time, integer, nonnegative_number
 
 from dataclasses import dataclass
@@ -18,6 +18,7 @@ from collections.abc import Callable, Iterator, Mapping
 from .function import Function
 from .container import DockerContainer, ContainerState
 from .pool import ContainerPool
+from .offloading import NodeScheduling, OffloadingScheduler
 
 if TYPE_CHECKING:
     from .region import Region
@@ -143,7 +144,8 @@ class Node:
         self._container_ids = count(1)
         self._idle_timeout = nonnegative_number(idle_timeout, 'node.idle_timeout')
 
-        # Coda FIFO per le richieste in attesa di ammissione
+        # Scheduler e coda FIFO
+        self._scheduler = OffloadingScheduler.create(tuple, NodeScheduling())
         self._queue_capacity = max(0, integer(queue_capacity, 'queue_capacity'))
         self._queue: deque[Request] = deque()
 
@@ -180,6 +182,16 @@ class Node:
     def region(self) -> Region:
         return self.infrastructure.region
 
+    ### Scheduling ###
+
+    @property
+    def scheduler(self) -> OffloadingScheduler:
+        return self._scheduler
+
+    @scheduler.setter
+    def scheduler(self, value):
+        self._scheduler = value
+
     ### Node State ###
 
     @property
@@ -210,9 +222,104 @@ class Node:
             raise ValueError('Aggiornamento della funzione non supportato dal modello')
         return pool
 
+    ### Resources ###
+
+    def can_allocate(self, function: Function) -> bool:
+        """Verifica se il nodo può allocare risorse per la funzione."""
+        return (
+            self.resources.available_cpus >= function.cpu_demand and
+            self.resources.available_memory >= function.memory_mb
+        )
+
     #################################
     ### Internal state management ###
     #################################
+
+    ## Request management ##
+
+    def receive(self, request: Request) -> Node | None:
+        """Applica la policy locale e inoltra la richiesta se necessario."""
+        request.ensure_created()
+
+        # Si delega la decisione di routing allo scheduler configurato sul nodo.
+        #
+        # Se lo scheduler restituisce un nodo o una regione, la richiesta viene inoltrata.
+        # Se lo scheduler restituisce None, la richiesta può essere accettata o messa in coda.
+        #
+        # Lo scheduler esegue la submit locale se la policy lo consente,
+        # altrimenti rifiuta la richiesta.
+        target: Node | Region | None = self._scheduler.schedule(request, self)
+
+        # Se lo scheduler ha scelto un target, si inoltra la richiesta al target selezionato.
+        if target is not None:
+            return self.infrastructure.forward(request, target, source=self)
+
+        # Se lo scheduler non ha scelto un target, si verifica lo stato della richiesta
+        # a seguito della submit locale. Se la richiesta è stata accettata o messa in coda,
+        if request.is_accepted or request.is_queued:
+            return self
+
+        return None
+
+    def submit(
+            self, request: Request, *, allow_queue: bool = True, reject_on_failure: bool = True,
+    ) -> bool:
+        """Tenta l'ammissione locale dopo la selezione di un ring compatibile.
+
+        Riusa un busy sotto il limite di concorrenza, poi un idle, oppure
+        prenota una nuova creazione. Durante il routing, un tentativo fallito
+        lascia la richiesta disponibile per il candidato successivo.
+        Una creazione resta CREATING fino alla notifica esplicita del suo esito,
+        senza esecuzione automatica.
+        """
+        request.ensure_created()
+
+        # Si notifica l'invio della richiesta al nodo, prima di tentare l'ammissione.
+        if self.on_request_submitted is not None:
+            self.on_request_submitted(self, request)
+
+        # Si tenta di acquisire un container. La policy decide se usare la FIFO.
+        container = self.acquire(request.function)
+        if container is None:
+            if allow_queue:
+                return self.enqueue(request, reject_on_failure=reject_on_failure)
+            if reject_on_failure:
+                request.reject('out_of_resources', node=self)
+            return False
+
+        # Se l'ammissione ha successo, si notifica l'accettazione della richiesta sul container.
+        request.accept_on_container(container=container)
+        return True
+
+    def enqueue(self, request: Request, *, reject_on_failure: bool = True) -> bool:
+        """Mette in attesa sul nodo destinatario se resta posto nella FIFO."""
+
+        # Se la coda è piena, si rifiuta la richiesta se richiesto.
+        if len(self._queue) >= self._queue_capacity:
+            if reject_on_failure:
+                request.reject('out_of_resources', node=self)
+            return False
+
+        # Se c'è posto nella coda, si registra la richiesta in attesa e si notifica l'accodamento.
+        request.enqueue(self)
+        self._queue.append(request)
+
+        return True
+
+    def dispatch_waiting(self) -> None:
+        """Tenta di ammettere le richieste in attesa nella coda FIFO."""
+        while self._queue:
+            # Si tenta di ammettere la prima richiesta in coda; se non ci sono risorse, si esce.
+            request = self._queue[0]
+            container = self.acquire(request.function)
+            if container is None:
+                break
+
+            # Se la richiesta può essere ammesse, si rimuove dalla coda e si notifica l'ammissione.
+            request = self._queue.popleft()
+            request.accept_on_container(container)
+            if self.on_request_dequeued is not None:
+                self.on_request_dequeued(self, request)
 
     ## Container management ##
 
@@ -364,68 +471,6 @@ class Node:
         container.destroy()
         pool.remove_idle(container)
         self.resources.release(container.function, idle=True)
-
-    ## Request management ##
-
-    def submit(
-        self, request: Request, *, allow_queue: bool = True, reject_on_failure: bool = True,
-    ) -> bool:
-        """Tenta l'ammissione locale dopo la selezione di un ring compatibile.
-
-        Riusa un busy sotto il limite di concorrenza, poi un idle, oppure
-        prenota una nuova creazione. Durante il routing, un tentativo fallito
-        lascia la richiesta disponibile per il candidato successivo.
-        Una creazione resta CREATING fino alla notifica esplicita del suo esito,
-        senza esecuzione automatica.
-        """
-        request.ensure_created()
-
-        # Si notifica l'invio della richiesta al nodo, prima di tentare l'ammissione.
-        if self.on_request_submitted is not None:
-            self.on_request_submitted(self, request)
-
-        # Si tenta di acquisire un container. La policy decide se usare la FIFO.
-        container = self.acquire(request.function)
-        if container is None:
-            if allow_queue:
-                return self.enqueue(request, reject_on_failure=reject_on_failure)
-            if reject_on_failure:
-                request.reject('out_of_resources', node=self)
-            return False
-
-        # Se l'ammissione ha successo, si notifica l'accettazione della richiesta sul container.
-        request.accept_on_container(container=container)
-        return True
-
-    def enqueue(self, request: Request, *, reject_on_failure: bool = True) -> bool:
-        """Mette in attesa sul nodo destinatario se resta posto nella FIFO."""
-
-        # Se la coda è piena, si rifiuta la richiesta se richiesto.
-        if len(self._queue) >= self._queue_capacity:
-            if reject_on_failure:
-                request.reject('out_of_resources', node=self)
-            return False
-
-        # Se c'è posto nella coda, si registra la richiesta in attesa e si notifica l'accodamento.
-        request.enqueue(self)
-        self._queue.append(request)
-
-        return True
-
-    def dispatch_waiting(self) -> None:
-        """Tenta di ammettere le richieste in attesa nella coda FIFO."""
-        while self._queue:
-            # Si tenta di ammettere la prima richiesta in coda; se non ci sono risorse, si esce.
-            request = self._queue[0]
-            container = self.acquire(request.function)
-            if container is None:
-                break
-
-            # Se la richiesta può essere ammesse, si rimuove dalla coda e si notifica l'ammissione.
-            request = self._queue.popleft()
-            request.accept_on_container(container)
-            if self.on_request_dequeued is not None:
-                self.on_request_dequeued(self, request)
 
     ## Callback handling ##
 

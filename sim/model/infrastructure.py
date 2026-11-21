@@ -26,8 +26,6 @@ class Infrastructure:
         self._rings: dict[str, ArchitectureRing] = {}
         self._region = region
         self._load_balancer = RandomLoadBalancer() if load_balancer is None else load_balancer
-        self._default_scheduler = OffloadingScheduler.create(self._nodes, NodeScheduling())
-        self._schedulers: dict[Node, OffloadingScheduler] = {}
         self._forward_region = forward_region
 
         ### Callback ###
@@ -66,7 +64,7 @@ class Infrastructure:
         if arch is None or memory is None or cpus is None:
             raise ValueError('Un nuovo anello richiede architettura, CPU e memoria')
         replicas = 128 if replicas is None else replicas
-        ring = ArchitectureRing(ring_id, arch, memory, cpus, replicas, infrastructure=self)
+        ring = ArchitectureRing(ring_id, arch, memory, cpus, infrastructure=self, replicas=replicas)
 
         # Registra l'anello prima di notificare la creazione.
         self._rings[ring_id] = ring
@@ -108,7 +106,8 @@ class Infrastructure:
         return matches[0]
 
     def configure_scheduler(self, node: Node, settings: NodeScheduling) -> None:
-        self._schedulers[node] = OffloadingScheduler.create(self._nodes, settings)
+        """Configura la policy del nodo con la vista dei vicini della regione."""
+        node.scheduler = OffloadingScheduler.create(self._nodes, settings)
 
     def _nodes(self) -> tuple[Node, ...]:
         return tuple(node for ring in self._rings.values() for node in ring)
@@ -130,7 +129,7 @@ class Infrastructure:
     def _route(self, request: Request) -> Node | None:
         rings = self._load_balancer.candidate_rings(request, self._rings.values())
         for ring in rings:
-            destination = ring.submit(request, schedule=self._schedule)
+            destination = ring.submit(request)
             if request.status is not RequestStatus.CREATED:
                 # La risposta dello scheduler arriva dopo la selezione del proxy.
                 return destination
@@ -142,19 +141,15 @@ class Infrastructure:
         if ring is None or ring.infrastructure is not self or node not in ring:
             request.reject('no_destination')
             return None
-        return self._schedule(request, node)
+        return node.receive(request)
 
-    def _schedule(self, request: Request, node: Node) -> Node | None:
-        scheduler = self._schedulers.get(node, self._default_scheduler)
-        target = scheduler.schedule(request, node)
-        if target is None:
-            return node if request.status in (RequestStatus.ACCEPTED, RequestStatus.QUEUED) else None
-
+    def forward(self, request: Request, target: 'Node | Region', *, source: Node) -> Node | None:
+        """Consegna l'invocazione al destinatario scelto dalla policy del nodo."""
         if isinstance(target, Node):
-            request.mark_offloaded(node)
+            request.mark_offloaded(source)
             return self._submit_to_node(request, target)
 
         if self._forward_region is None:
             request.reject('no_destination')
             return None
-        return self._forward_region(request, target, node)
+        return self._forward_region(request, target, source)

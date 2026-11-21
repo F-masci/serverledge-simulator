@@ -112,6 +112,41 @@ class Request:
         return self._status
 
     @property
+    def is_created(self) -> bool:
+        """Indica se la richiesta è stata creata e non ancora ammessa."""
+        return self._status is RequestStatus.CREATED
+
+    @property
+    def is_accepted(self) -> bool:
+        """Indica se la richiesta è stata ammessa su un container o una regione."""
+        return self._status is RequestStatus.ACCEPTED
+
+    @property
+    def is_rejected(self) -> bool:
+        """Indica se la richiesta è stata rifiutata definitivamente."""
+        return self._status is RequestStatus.REJECTED
+
+    @property
+    def is_completed(self) -> bool:
+        """Indica se la richiesta è stata completata con risposta consegnata."""
+        return self._status is RequestStatus.COMPLETED
+
+    @property
+    def is_responding(self) -> bool:
+        """Indica se la richiesta ha completato il servizio e sta tornando la risposta."""
+        return self._status is RequestStatus.RESPONDING
+
+    @property
+    def is_queued(self) -> bool:
+        """Indica se la richiesta è in attesa di ammissione nella FIFO del nodo."""
+        return self._status is RequestStatus.QUEUED
+
+    @property
+    def is_in_transit(self) -> bool:
+        """Indica se la richiesta è in viaggio verso la regione di destinazione."""
+        return self._status is RequestStatus.IN_TRANSIT
+
+    @property
     def is_container_accepted(self) -> bool:
         """Indica se la richiesta è stata ammessa su un container."""
         return self._status is RequestStatus.ACCEPTED and self._container is not None
