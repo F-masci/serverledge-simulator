@@ -5,6 +5,12 @@
 # Cache Python
 __pycache__/
 
+# Coverage
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
 # Configurazione locale e credenziali
 .env
 .env.*
