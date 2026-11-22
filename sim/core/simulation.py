@@ -13,7 +13,7 @@ from sim.model.container import DockerContainer
 from sim.model.events import ArrivalEvent, CompletionEvent, ContainerCleanupEvent, ContainerReadyEvent, ScheduledEvent
 from sim.model.events.region_delivery_event import RegionDeliveryEvent
 from sim.model.infrastructure import Infrastructure
-from sim.model.load_balancer import build_load_balancer
+from sim.model.load_balancer import LoadBalancer
 from sim.model.node import Node
 from sim.model.offloading import NodeScheduling
 from sim.model.region import Region
@@ -124,7 +124,7 @@ class Simulation:
         config = scenario.regions[name].infrastructure
         assert config is not None
         stream_id = 'load_balancer' if name == scenario.primary_region else f'load_balancer/{name}'
-        load_balancer = build_load_balancer(scenario.load_balancer, seed=scenario.seed, stream_id=stream_id)
+        load_balancer = LoadBalancer.create(scenario.load_balancer, seed=scenario.seed, stream_id=stream_id)
         infrastructure = Infrastructure(
             load_balancer,
             forward_region=self._forward_region,

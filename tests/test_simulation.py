@@ -193,7 +193,7 @@ class SimulationTest(unittest.TestCase):
         definition = json.loads(source.read_text(encoding='utf-8'))
         with TemporaryDirectory() as directory:
             path = Path(directory) / 'scenario.json'
-            for mode in ('MAB', 'RoundRobin', 'ArchitectureUnaware'):
+            for mode in ('MAB', 'ArchitectureUnaware'):
                 with self.subTest(mode=mode):
                     definition['load_balancer'] = mode
                     path.write_text(json.dumps(definition), encoding='utf-8')
@@ -201,6 +201,12 @@ class SimulationTest(unittest.TestCase):
                     self.assertEqual(scenario.load_balancer, mode)
                     with self.assertRaisesRegex(NotImplementedError, mode):
                         Simulation(scenario)
+
+            definition['load_balancer'] = 'RoundRobin'
+            path.write_text(json.dumps(definition), encoding='utf-8')
+            scenario = Scenario.load(path)
+            self.assertEqual(scenario.load_balancer, 'RoundRobin')
+            Simulation(scenario)
 
             definition['load_balancer'] = 'Other'
             path.write_text(json.dumps(definition), encoding='utf-8')

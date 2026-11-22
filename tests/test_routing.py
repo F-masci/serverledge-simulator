@@ -103,10 +103,38 @@ class RoutingTest(unittest.TestCase):
         self.assertEqual(rejected.rejection_reason, 'no_destination')
         self.assertEqual(regular.resources.used_cpus, 0)
 
+    def test_round_robin_balancer_cycles_compatible_rings_in_registration_order(self):
+        infra = Infrastructure()
+        for ring_id, arch, tag in (
+            ('empty', 'amd64', None),
+            ('first', 'amd64', 'x86-large/gpu/nvidia'),
+            ('wrong-arch', 'arm64', 'arm/gpu/nvidia'),
+            ('second', 'amd64', 'x86-tiny/gpu/nvidia'),
+            ('third', 'amd64', 'x86-mid/gpu/nvidia'),
+        ):
+            infra.create_ring(ring_id, arch=arch, memory=512, cpus=2)
+            if tag is not None:
+                infra.create_node(ring_id, ring_id, tag)
+
+        balancer = RoundRobinLoadBalancer()
+        all_gpu = replace(function(archs=('amd64',)), tag_pattern='gpu')
+        only_third = replace(function(archs=('amd64',)), tag_pattern='x86-mid')
+
+        # Cicla sugli anelli compatibili saltando quelli vuoti o con architettura incompatibile.
+        draws = [
+            balancer.submit(Request(all_gpu), infra.rings.values()).id
+            for _ in range(4)
+        ]
+        self.assertEqual(draws, ['first', 'second', 'third', 'first'])
+
+        # Una richiesta compatibile solo con 'third' avanza l'indice globale oltre 'third',
+        # quindi la richiesta successiva riparte da 'first'.
+        self.assertEqual(balancer.submit(Request(only_third), infra.rings.values()).id, 'third')
+        self.assertEqual(balancer.submit(Request(all_gpu), infra.rings.values()).id, 'first')
+
     def test_unavailable_balancers_fail_on_instantiation(self):
         for balancer, mode in (
             (MABLoadBalancer, 'MAB'),
-            (RoundRobinLoadBalancer, 'RoundRobin'),
             (ArchitectureUnawareLoadBalancer, 'ArchitectureUnaware'),
         ):
             with self.subTest(mode=mode), self.assertRaisesRegex(NotImplementedError, mode):
