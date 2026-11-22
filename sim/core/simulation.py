@@ -249,6 +249,7 @@ class Simulation:
     ) -> None:
         """Gestisce accettazione e ritorno dei rifiuti remoti della richiesta."""
         if current is RequestStatus.RESPONDING and previous is RequestStatus.CREATED:
+            self._ctx.observer.notify_request_rejection_returning(request)
             self._ctx.engine.schedule_after(
                 request.return_delay, ResponseEvent(ctx=self._ctx, request=request),
             )
@@ -320,6 +321,7 @@ class Simulation:
         """Costruisce i binding di ciclo di vita per ogni nodo creato."""
         return NodeBindings(
             on_node_registered=self._ctx.observer.notify_node_registered,
+            on_node_removed=self._ctx.observer.notify_node_removed,
             on_container_state_changed=self._ctx.observer.notify_container_state,
             on_container_idle=self._schedule_container_cleanup,
             on_request_dequeued=self._request_dequeued,

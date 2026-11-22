@@ -108,3 +108,41 @@ class NodeRegistered(Notification):
                 'containers': [snapshot.to_dict() for snapshot in self.containers],
             },
         }
+
+
+@dataclass(frozen=True)
+class NodeRemoved(Notification):
+    """Notifica la rimozione di un nodo dalla topologia (scale-in)."""
+
+    type = NotificationType.NODE_REMOVED
+    level = DEBUG
+
+    run_id: str
+    sim_time_s: float
+    region: 'Region'
+    ring: 'ArchitectureRing'
+    node: Node
+    resources: ResourceSnapshot
+
+    #####################
+    ### Serialization ###
+    #####################
+
+    def __str__(self) -> str:
+        return (
+            f'[{self.sim_time_s:.6g} s] {self.type.value} '
+            f'nodo={self.node.id.key} ring={self.ring.id} regione={self.region.name}'
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            'type': self.type.value,
+            'run_id': self.run_id,
+            'sim_time_s': self.sim_time_s,
+            'data': {
+                'region': self.region.name,
+                'ring_id': self.ring.id,
+                'node_id': self.node.id.key,
+                'resources': self.resources.to_dict(),
+            },
+        }

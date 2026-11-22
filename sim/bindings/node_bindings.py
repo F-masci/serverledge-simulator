@@ -27,6 +27,7 @@ class NodeBindings:
     ### Lifecycle Callbacks ###
 
     on_node_registered: Callable[[Node], None] | None = None
+    on_node_removed: Callable[[Node], None] | None = None
 
     ### Container Callbacks ###
 

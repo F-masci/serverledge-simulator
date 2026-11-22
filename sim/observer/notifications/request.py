@@ -156,6 +156,24 @@ class RequestAccepted(_RequestNotification):
 
 
 @dataclass(frozen=True)
+class RequestRejectionReturning(_RequestNotification):
+    """La richiesta è stata rifiutata da una regione remota e il rifiuto è in ritorno."""
+
+    type = NotificationType.REQUEST_REJECTION_RETURNING
+    level = DEBUG
+
+    reason: str
+    node: 'Node | None'
+
+    def _data(self) -> dict:
+        return {
+            **super()._data(),
+            'reason': self.reason,
+            'node_id': self.node.id.key if self.node is not None else None,
+        }
+
+
+@dataclass(frozen=True)
 class RequestRejected(_RequestNotification):
     """La richiesta è stata rifiutata definitivamente durante il routing o l'ammissione."""
 

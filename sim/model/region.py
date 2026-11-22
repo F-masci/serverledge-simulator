@@ -140,13 +140,30 @@ class Region:
         node_bindings: 'NodeBindings | None' = None,
     ) -> Infrastructure:
         """Costruisce load balancer, anelli e nodi della regione a partire dallo scenario."""
-        config = scenario.regions[self._name].infrastructure
+        region_config = scenario.regions[self._name]
+        config = region_config.infrastructure
         assert config is not None
 
         # Crea il load balancer con uno stream PRNG dedicato alla regione.
+        # La modalità e il numero di repliche possono essere definiti sulla singola regione
+        # o ereditati dallo scenario (default 128; se non specificati, ArchitectureUnaware
+        # eredita le repliche dei soli anelli non vuoti se uniformi).
         streams = RandomStreams(scenario.seed)
         stream_id = 'load_balancer' if self._name == scenario.primary_region else f'load_balancer/{self._name}'
-        load_balancer = LoadBalancer.create(scenario.load_balancer, seed=scenario.seed, stream_id=stream_id)
+        lb_mode = region_config.load_balancer or scenario.load_balancer
+        explicit_replicas = (
+            region_config.load_balancer_replicas
+            if region_config.load_balancer_replicas is not None
+            else scenario.load_balancer_replicas
+        )
+        if explicit_replicas is not None:
+            lb_replicas = explicit_replicas
+        else:
+            active_replicas = {ring.replicas or 128 for ring in config.rings if ring.nodes}
+            lb_replicas = next(iter(active_replicas)) if len(active_replicas) == 1 else 128
+        load_balancer = LoadBalancer.create(
+            lb_mode, seed=scenario.seed, stream_id=stream_id, replicas=lb_replicas,
+        )
         infrastructure = Infrastructure(
             load_balancer,
             region=self,
@@ -154,10 +171,13 @@ class Region:
         )
 
         # Popola gli anelli e i rispettivi nodi con i parametri dello scenario.
+        # Un ring senza replicas esplicite eredita load_balancer_replicas (come lb.replicas in Go).
+        default_ring_replicas = explicit_replicas if explicit_replicas is not None else 128
         for ring in config.rings:
             self._create_ring(
                 infrastructure, ring.id,
-                arch=ring.arch, memory=ring.memory_mb, cpus=ring.cpus, replicas=ring.replicas,
+                arch=ring.arch, memory=ring.memory_mb, cpus=ring.cpus,
+                replicas=ring.replicas if ring.replicas is not None else default_ring_replicas,
                 machine_tag=ring.machine_tag,
             )
             for node in ring.nodes:
@@ -221,14 +241,10 @@ class Region:
             return None
 
         # In assenza di load balancer e di un nodo esplicito si indirizza al primo nodo registrato,
-        # verificando architettura e machine_tag.
+        # lasciando allo scheduler del nodo le verifiche di architettura ed eventuale offloading.
         if node is None and not self._has_load_balancer:
             node = self.first_registered_node()
-            if (
-                node is None
-                or not request.function.supports_arch(node.id.arch)
-                or not request.function.supports_machine_tag(node.id.machine_tag)
-            ):
+            if node is None:
                 request.reject('no_destination')
                 return None
 

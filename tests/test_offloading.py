@@ -47,15 +47,15 @@ class OffloadingTest(unittest.TestCase):
         self.assertIs(self.infrastructure.submit(fallback, node=origin), origin)
         self.assertIsNone(fallback.to_dict()['offloaded_from_node_id'])
 
-    def test_edgeonly_does_not_fallback_locally_when_no_neighbors_exist(self):
+    def test_edgeonly_falls_back_locally_when_zero_neighbors_after_discovery(self):
         origin = self.node('origin')
         self.infrastructure.configure_scheduler(origin, NodeScheduling(
             SchedulingPolicy.EDGE_ONLY, fallback_local=True,
         ))
         request = Request(self.function, can_offload=True)
-        self.assertIsNone(self.infrastructure.submit(request, node=origin))
-        self.assertIs(request.status, RequestStatus.REJECTED)
-        self.assertEqual(origin.resources.used_cpus, 0)
+        self.assertIs(self.infrastructure.submit(request, node=origin), origin)
+        self.assertIs(request.status, RequestStatus.ACCEPTED)
+        self.assertEqual(origin.resources.used_cpus, 1)
 
     def test_edgeonly_local_fallback_does_not_use_the_fifo(self):
         origin = self.node('origin', queue_capacity=1)

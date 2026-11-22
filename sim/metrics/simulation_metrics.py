@@ -95,6 +95,8 @@ class SimulationMetrics:
     @staticmethod
     def _aggregate_resources(node_snapshots: list[dict]) -> dict:
         """Aggrega capacità e utilizzo medio delle risorse su un insieme di nodi."""
+        # FIXME (scale-in/scale-out): pesare le medie per observed_time_s e includere in
+        # _nodes_snapshot anche i nodi rimossi in corso di simulazione.
         total_cpus = sum(node['total_cpus'] for node in node_snapshots)
         total_memory_mb = sum(node['total_memory_mb'] for node in node_snapshots)
         mean_cpus = [

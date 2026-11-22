@@ -8,8 +8,8 @@ from sim.random.distributions import (
     GammaServiceTime, PoissonArrivalProcess, ServiceTime,
 )
 from sim.random.streams import RandomStreams
-from sim.utils.machine_tag import matches_machine_tag
-from sim.utils.validation import nonnegative_number, one_of, positive_number
+from sim.utils.machine_tag import matches_machine_tag, validate_tag_pattern
+from sim.utils.validation import integer, nonnegative_number, one_of, positive_integer, positive_number
 from .runtime import CustomRuntime, Runtime
 
 
@@ -115,13 +115,21 @@ class Function:
     sampler: FunctionSampler | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
-        if not self.name or self.memory_mb < 1:
-            raise ValueError('Nome e memoria positiva obbligatori')
+        if not self.name:
+            raise ValueError('Nome funzione obbligatorio')
+        positive_integer(self.memory_mb, 'function.memory_mb')
         positive_number(self.cpu_demand, 'function.cpu_demand')
+        integer(self.max_concurrency, 'function.max_concurrency')
         if self.supported_archs is None and isinstance(self.runtime, CustomRuntime):
             raise ValueError('Specificare le architetture risolte per la immagine custom')
-        archs = ('amd64', 'arm64') if self.supported_archs is None else self.supported_archs
-        object.__setattr__(self, 'supported_archs', tuple(archs))
+        # Nota: nell'API Go (internal/api/api.go) i runtime integrati ricevono sempre
+        # ('amd64', 'arm64'); il simulatore consente di restringerli nello scenario per
+        # modellare vincoli architetturali senza dover dichiarare immagini custom.
+        archs = ('amd64', 'arm64') if self.supported_archs is None else tuple(self.supported_archs)
+        if not archs:
+            raise ValueError('supported_archs non può essere vuoto')
+        validate_tag_pattern(self.tag_pattern)
+        object.__setattr__(self, 'supported_archs', archs)
         object.__setattr__(self, 'max_concurrency',
                            self.runtime.effective_concurrency(self.max_concurrency))
 

@@ -1,6 +1,6 @@
 """Collector delle metriche topologiche e di capacità allocata nel tempo (autoscaling)."""
 
-from sim.observer.notifications import NodeRegistered, Notification, NotificationType
+from sim.observer.notifications import NodeRegistered, NodeRemoved, Notification, NotificationType
 from sim.utils.welford import TimedWelford
 from .base import MetricCollector, NodeKey, RingKey, timed_snapshot
 
@@ -29,6 +29,16 @@ class _TopologyMetrics:
         self.current_memory_mb += memory_mb
         if now > 0:
             self.scale_out_events += 1
+        self.active_nodes.observe(now, self.current_nodes)
+        self.provisioned_cpus.observe(now, self.current_cpus)
+        self.provisioned_memory_mb.observe(now, self.current_memory_mb)
+
+    def record_node_removed(self, now: float, cpus: float, memory_mb: int) -> None:
+        """Registra la rimozione di un nodo dalla topologia (scale-in)."""
+        self.current_nodes = max(0, self.current_nodes - 1)
+        self.current_cpus = max(0.0, self.current_cpus - cpus)
+        self.current_memory_mb = max(0, self.current_memory_mb - memory_mb)
+        self.scale_in_events += 1
         self.active_nodes.observe(now, self.current_nodes)
         self.provisioned_cpus.observe(now, self.current_cpus)
         self.provisioned_memory_mb.observe(now, self.current_memory_mb)
@@ -74,7 +84,7 @@ class _TopologyMetricsCollector(MetricCollector):
 
     @property
     def notification_types(self) -> tuple[NotificationType, ...]:
-        return (NotificationType.NODE_REGISTERED,)
+        return (NotificationType.NODE_REGISTERED, NotificationType.NODE_REMOVED)
 
     ### Query state ###
 
@@ -97,24 +107,39 @@ class _TopologyMetricsCollector(MetricCollector):
     #############################
 
     def handle_notification(self, notification: Notification) -> None:
-        """Aggiorna gli accumulatori topologici alla registrazione di un nodo."""
-        if not isinstance(notification, NodeRegistered):
+        """Aggiorna gli accumulatori topologici alla registrazione o rimozione di un nodo."""
+        if isinstance(notification, NodeRegistered):
+            region_name = notification.region.name
+            ring_id = notification.ring.id
+            node_key: NodeKey = (region_name, ring_id, notification.node.id.key)
+            if node_key in self._registered_nodes:
+                return
+            self._registered_nodes.add(node_key)
+
+            now = notification.sim_time_s
+            cpus = notification.resources.total_cpus
+            memory_mb = notification.resources.total_memory_mb
+
+            self._total.record_node_added(now, cpus, memory_mb)
+            self._by_region.setdefault(region_name, _TopologyMetrics()).record_node_added(now, cpus, memory_mb)
+            self._by_ring.setdefault((region_name, ring_id), _TopologyMetrics()).record_node_added(now, cpus, memory_mb)
             return
 
-        region_name = notification.region.name
-        ring_id = notification.ring.id
-        node_key: NodeKey = (region_name, ring_id, notification.node.id.key)
-        if node_key in self._registered_nodes:
-            return
-        self._registered_nodes.add(node_key)
+        if isinstance(notification, NodeRemoved):
+            region_name = notification.region.name
+            ring_id = notification.ring.id
+            node_key = (region_name, ring_id, notification.node.id.key)
+            if node_key not in self._registered_nodes:
+                return
+            self._registered_nodes.remove(node_key)
 
-        now = notification.sim_time_s
-        cpus = notification.resources.total_cpus
-        memory_mb = notification.resources.total_memory_mb
+            now = notification.sim_time_s
+            cpus = notification.resources.total_cpus
+            memory_mb = notification.resources.total_memory_mb
 
-        self._total.record_node_added(now, cpus, memory_mb)
-        self._by_region.setdefault(region_name, _TopologyMetrics()).record_node_added(now, cpus, memory_mb)
-        self._by_ring.setdefault((region_name, ring_id), _TopologyMetrics()).record_node_added(now, cpus, memory_mb)
+            self._total.record_node_removed(now, cpus, memory_mb)
+            self._by_region.setdefault(region_name, _TopologyMetrics()).record_node_removed(now, cpus, memory_mb)
+            self._by_ring.setdefault((region_name, ring_id), _TopologyMetrics()).record_node_removed(now, cpus, memory_mb)
 
     #####################
     ### Serialization ###

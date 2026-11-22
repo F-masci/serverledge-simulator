@@ -159,13 +159,13 @@ class EdgeOnlyScheduler(OffloadingScheduler):
 
         # Se l'invocazione può essere inoltrata, cerca un vicino compatibile con più memoria disponibile.
         if request.can_offload:
-            target, has_neighbors = self._edge_target(request, node, self._settings.nearest_neighbors, now=now)
+            target = self._edge_target(request, node, self._settings.nearest_neighbors, now=now)
             if target is not None:
                 return target
 
-            # Come in EdgePolicy.OnArrival di Serverledge: il fallback locale si applica
-            # solo se esistono vicini ma nessuno è idoneo (NoSuitableNode), non se mancano vicini (NoNeighbors).
-            if not has_neighbors or not self._settings.fallback_local:
+            # In regime post-discovery Go (nearestNeighbors == [] non-nil), l'assenza di vicini
+            # idonei produce NoSuitableNode e applica il fallback locale se abilitato.
+            if not self._settings.fallback_local:
                 request.reject('out_of_resources', node=node)
                 return None
 
@@ -176,7 +176,7 @@ class EdgeOnlyScheduler(OffloadingScheduler):
 
     def _edge_target(
         self, request: Request, node: Node, neighbors: tuple[Node, ...] | None, *, now: float = 0.0,
-    ) -> tuple[Node | None, bool]:
+    ) -> Node | None:
         """Sceglie il vicino compatibile con più memoria disponibile, con cache per funzione."""
         # Vengono estratti tutti i nodi registrati nella regione del nodo, escludendo il nodo stesso.
         # Se sono specificati vicini, vengono filtrati tra quelli registrati.
@@ -193,7 +193,7 @@ class EdgeOnlyScheduler(OffloadingScheduler):
             if cached is not None:
                 cached_peer, expiration = cached
                 if now < expiration and cached_peer in registered:
-                    return cached_peer, True
+                    return cached_peer
                 del self._cache[request.function.name]
 
         # Se non sono specificati vicini, considera i primi due peer registrati come candidati.
@@ -203,7 +203,7 @@ class EdgeOnlyScheduler(OffloadingScheduler):
             candidates = tuple(peer for peer in neighbors if peer in registered)
 
         if not candidates:
-            return None, False
+            return None
 
         # Filtra i candidati per trovare quelli compatibili con la funzione richiesta.
         suitable = (
@@ -215,7 +215,7 @@ class EdgeOnlyScheduler(OffloadingScheduler):
         selected = max(suitable, key=lambda peer: peer.resources.available_memory, default=None)
         if selected is not None and validity > 0:
             self._cache[request.function.name] = (selected, now + validity)
-        return selected, True
+        return selected
 
 
 class CloudOnlyScheduler(OffloadingScheduler):

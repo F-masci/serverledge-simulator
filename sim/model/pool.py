@@ -53,10 +53,6 @@ class ContainerPool:
 
         return None
 
-    def has_reusable_busy(self) -> bool:
-        """Indica se esiste un container busy con slot di concorrenza liberi."""
-        return self._get_reusable_busy() is not None
-
     def _get_reusable_busy(self) -> DockerContainer | None:
         """Restituisce un container già in uso che non abbia raggiunto la concorrenza massima, se disponibile."""
         return next((c for c in self._busy

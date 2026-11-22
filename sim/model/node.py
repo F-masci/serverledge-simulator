@@ -5,7 +5,6 @@ I contatori busy/warm rappresentano prenotazioni, non consumo fisico misurato.
 from __future__ import annotations
 
 import json
-import math
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -15,10 +14,10 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from sim.random.streams import RandomStreams, StreamKind
-from sim.utils.validation import integer, nonnegative_number
+from sim.utils.validation import integer, nonnegative_number, positive_integer, positive_number
 from .container import DockerContainer, ContainerState
 from .function import Function
-from .offloading import DefaultScheduler, NodeScheduling, OffloadingScheduler
+from .offloading import NodeScheduling, OffloadingScheduler
 from .pool import ContainerPool
 from .request import Request
 
@@ -46,10 +45,8 @@ class Resources:
     """
 
     def __init__(self, total_memory: int, total_cpus: float) -> None:
-        if total_memory < 1 or not math.isfinite(total_cpus) or total_cpus <= 0:
-            raise ValueError('Capacità del nodo non valide')
-        self._total_memory = total_memory
-        self._total_cpus = total_cpus
+        self._total_memory = positive_integer(total_memory, 'node.total_memory')
+        self._total_cpus = positive_number(total_cpus, 'node.total_cpus')
         self._busy_pool_used_mem = 0
         self._warm_pool_used_mem = 0
         self._used_cpus = 0.0
@@ -240,26 +237,11 @@ class Node:
     ### Resources ###
 
     def can_allocate(self, function: Function) -> bool:
-        """Verifica se il nodo può eseguire subito la funzione (riuso busy o risorse disponibili)."""
-        pool = self._pools.get(function.name)
-        if pool is not None and pool.has_reusable_busy():
-            return True
+        """Verifica se il nodo soddisfa il controllo CPU/RAM del proxy (come DefaultMemoryChecker/DefaultCPUChecker)."""
         return (
             self.resources.available_cpus >= function.cpu_demand and
             self.resources.available_memory >= function.memory_mb
         )
-
-    def can_enqueue(self, request: Request) -> bool:
-        """Indica se il nodo può accodare la richiesta nella propria FIFO locale."""
-        return (
-            isinstance(self._scheduler, DefaultScheduler)
-            and len(self._queue) < self._queue_capacity
-            and request.function.supports_arch(self.id.arch)
-        )
-
-    def can_offload_request(self, request: Request) -> bool:
-        """Indica se la policy del nodo può gestire la richiesta tramite offloading."""
-        return request.can_offload and not isinstance(self._scheduler, DefaultScheduler)
 
     #################################
     ### Internal state management ###
@@ -306,15 +288,12 @@ class Node:
         assert source is not None
 
         # Se la regione remota è simulata ma priva di load balancer, verifica subito
-        # la presenza e la compatibilità (architettura e machine tag) del primo nodo registrato.
+        # la presenza e la compatibilità architetturale del primo nodo registrato
+        # (come handleCloudOffload in internal/scheduling/scheduler.go).
         target: Node | None = None
         if destination.infrastructure is not None and not destination.has_load_balancer:
             target = destination.first_registered_node()
-            if (
-                target is None
-                or not request.function.supports_arch(target.id.arch)
-                or not request.function.supports_machine_tag(target.id.machine_tag)
-            ):
+            if target is None or not request.function.supports_arch(target.id.arch):
                 request.reject('out_of_resources', node=self)
                 return None
 
@@ -467,7 +446,8 @@ class Node:
         candidates = []
         reclaimable = 0
 
-        # Mescola l'ordine dei pool per replicare l'iterazione non deterministica delle map Go.
+        # Mescola uniformemente l'ordine dei pool per modellare l'iterazione non garantita
+        # delle map Go (senza riprodurre il bias interno dei bucket da 8 slot del runtime Go).
         pools = list(self._pools.values())
         if len(pools) > 1:
             self._eviction_rng.shuffle(pools)
@@ -487,7 +467,7 @@ class Node:
 
         # Rimuove i candidati e aggiorna le prenotazioni del nodo.
         for container in candidates:
-            self._destroy_idle(container)
+            self._destroy_idle(container, evicted=True)
 
         return reclaimable
 
@@ -535,14 +515,16 @@ class Node:
             return
 
         # Come DeleteExpiredContainer in Go, compatta la lista idle preservando l'ordine.
-        self._destroy_idle(container, preserve_order=True)
+        self._destroy_idle(container, preserve_order=True, evicted=False)
 
-    def _destroy_idle(self, container: DockerContainer, *, preserve_order: bool = False) -> None:
+    def _destroy_idle(
+        self, container: DockerContainer, *, preserve_order: bool = False, evicted: bool = False,
+    ) -> None:
         """Rimuove un container idle dal pool e aggiorna le prenotazioni."""
         pool = self._get_pool(container.function)
         pool.remove_idle(container, preserve_order=preserve_order)
         self.resources.release(container.function, idle=True)
-        container.destroy()
+        container.destroy(evicted=evicted)
 
     ## Callback handling ##
 

@@ -170,12 +170,14 @@ class RegionsTest(unittest.TestCase):
         simulation = Simulation(scenario)
         simulation.run(arrivals=1)
 
-        # Alla consegna (t=2) il rifiuto entra in fase di ritorno; il rifiuto finale arriva a t=4.
+        # Alla consegna (t=2) il rifiuto entra in fase di ritorno; in_transit/pending restano 1.
         self.advance_to(simulation, 2)
-        self.assertEqual(simulation.metrics_snapshot()['total']['rejected'], 0)
+        mid = simulation.metrics_snapshot()['total']
+        self.assertEqual((mid['arrivals'], mid['rejected'], mid['in_transit'], mid['pending']), (1, 0, 1, 1))
 
         self.advance_to(simulation, 4)
-        self.assertEqual(simulation.metrics_snapshot()['total']['rejected'], 1)
+        final = simulation.metrics_snapshot()['total']
+        self.assertEqual((final['arrivals'], final['rejected'], final['in_transit'], final['pending']), (1, 1, 0, 0))
         rejected, = [
             event for event in self.notifications
             if event.run_id == simulation.run_id and event.type is NotificationType.REQUEST_REJECTED

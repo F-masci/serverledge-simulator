@@ -91,12 +91,15 @@ class Infrastructure:
         ring = self.get_ring(ring_id)
         if ring is None:
             raise ValueError(f'Anello non trovato: {ring_id}')
+        if any(existing.key == name for existing in self._nodes()):
+            raise ValueError(f"Nodo già presente nell'infrastruttura: {name}")
 
-        # L'anello registra il nodo prima della notifica.
+        # L'anello registra il nodo e notifica il load balancer prima delle callback esterne.
         node = ring.create_node(
             name, machine_tag,
             idle_timeout=idle_timeout, queue_capacity=queue_capacity, eviction_rng=eviction_rng,
         )
+        self._load_balancer.on_node_added(ring)
         if self.on_node_created is not None:
             self.on_node_created(self, ring, node)
         return node
@@ -144,7 +147,7 @@ class Infrastructure:
         return self._load_balancer.route(request, self._rings.values(), now=now)
 
     def _submit_to_node(self, request: Request, node: Node, *, now: float = 0.0) -> Node | None:
-        ring = node.ring
+        ring = node._ring
         if ring is None or ring.infrastructure is not self or node not in ring:
             request.reject('no_destination')
             return None

@@ -380,8 +380,8 @@ class SimulationTest(unittest.TestCase):
             service = Scenario.load(path).function_registry.get('fixed').sampler.service
             self.assertEqual((service.mean, service.scv), (0.25, 0.5))
 
-    def test_balancer_enqueues_at_saturation_when_local_queue_enabled(self):
-        """A saturazione il bilanciatore inoltra alla FIFO del nodo e rifiuta solo a coda piena."""
+    def test_balancer_rejects_at_saturation_even_with_local_queue_enabled(self):
+        """Come il proxy Go, i rifiuti del bilanciatore precedono l'ammissione locale."""
         definition = {
             'scheduler': {'queue': {'capacity': 1}},
             'functions': [{
@@ -403,16 +403,20 @@ class SimulationTest(unittest.TestCase):
         totals = simulation.metrics_snapshot()['total']
         self.assertEqual(
             (totals['arrivals'], totals['accepted'], totals['waiting'], totals['queued'], totals['rejected']),
-            (3, 1, 1, 1, 1),
+            (3, 1, 0, 0, 2),
         )
-        self.assertEqual(totals['pending'], 2)
+        self.assertEqual(totals['pending'], 1)
         self.advance_to(engine, 2.5)
         totals = simulation.metrics_snapshot()['total']
-        self.assertEqual((totals['accepted'], totals['completed'], totals['waiting'], totals['pending']), (2, 1, 0, 1))
+        self.assertEqual((totals['accepted'], totals['completed'], totals['pending']), (1, 1, 0))
         rejections = [event.to_dict()['data'] for event in notifications
                       if event.type is NotificationType.REQUEST_REJECTED]
         self.assertEqual([(event['reason'], event['node_id']) for event in rejections],
-                         [('out_of_resources', None)])
+                         [('out_of_resources', None)] * 2)
+
+        self.advance_to(engine, 3)
+        totals = simulation.metrics_snapshot()['total']
+        self.assertEqual((totals['accepted'], totals['warm_starts']), (2, 1))
 
     def test_local_queue_metrics_follow_queued_and_accepted_notifications(self):
         function = Function('hello', 128, 1, BuiltinRuntime('python314'), profile=FunctionProfile(
@@ -643,6 +647,74 @@ class SimulationTest(unittest.TestCase):
         self.assertTrue(second._ctx.engine.step())
         self.assertEqual(second.metrics_snapshot()['total']['accepted'], 1)
         self.assertEqual(first.metrics_snapshot()['total']['arrivals'], 1)
+
+    def test_scale_in_during_cold_start_drains_cleanly_and_updates_topology(self):
+        function = Function('hello', 128, 1, BuiltinRuntime('python314', startup_time=1.0), profile=FunctionProfile(
+            arrival_rate=0.1, service_rate=2, first_arrival_time=0,
+            arrival_distribution='deterministic', service_distribution='deterministic',
+        ))
+        simulation = Simulation(Scenario((function,), infrastructure=EDGE))
+        simulation.run(arrivals=1)
+        engine = simulation._ctx.engine
+        infra = simulation.regions['default'].infrastructure
+
+        # Rimuove l'unico nodo mentre il container è ancora CREATING.
+        infra.remove_node('edge', 'n1')
+        topology = simulation.metrics_snapshot()['topology']
+        self.assertEqual((topology['current_active_nodes'], topology['scale_in_events']), (0, 1))
+
+        # Il cold start e il completamento devono concludersi senza AssertionError.
+        self.advance_to(engine, 1.5)
+        totals = simulation.metrics_snapshot()['total']
+        self.assertEqual((totals['accepted'], totals['completed'], totals['pending']), (1, 1, 0))
+
+    def test_unaware_default_and_replicas_ignore_empty_rings(self):
+        fun = Function('hello', 128, 1, BuiltinRuntime('python314'), profile=FunctionProfile(
+            arrival_rate=1, service_rate=4, first_arrival_time=0,
+            arrival_distribution='deterministic', service_distribution='deterministic',
+        ))
+        scenario = Scenario((fun,), infrastructure={'rings': [
+            {'id': 'empty', 'arch': 'amd64', 'machine_tag': 'amd64/empty', 'memory_mb': 512, 'cpus': 2, 'nodes': []},
+            {'id': 'active', 'arch': 'amd64', 'machine_tag': 'amd64/active', 'memory_mb': 512, 'cpus': 2, 'replicas': 1,
+             'nodes': [{'name': 'one'}, {'name': 'three'}]},
+        ]})
+        self.assertEqual(scenario.load_balancer, 'ArchitectureUnaware')
+        simulation = Simulation(scenario)
+        lb = simulation.regions['default'].infrastructure._load_balancer
+        self.assertEqual(lb._replicas, 1)
+
+    def test_load_balancer_replicas_and_per_region_balancer_apply_to_all_rings(self):
+        fun = Function('hello', 128, 1, BuiltinRuntime('python314'), profile=FunctionProfile(
+            arrival_rate=1, service_rate=4, first_arrival_time=0,
+            arrival_distribution='deterministic', service_distribution='deterministic',
+        ))
+        scenario = Scenario(
+            (fun,),
+            load_balancer='RoundRobin',
+            load_balancer_replicas=1,
+            regions={
+                'edge': {
+                    'infrastructure': {'rings': [{
+                        'id': 'x86', 'arch': 'amd64', 'memory_mb': 512, 'cpus': 2,
+                        'nodes': [{'name': 'one'}, {'name': 'three'}],
+                    }]},
+                },
+                'cloud': {
+                    'load_balancer': 'ArchitectureUnaware',
+                    'load_balancer_replicas': 4,
+                    'infrastructure': {'rings': [{
+                        'id': 'c1', 'arch': 'amd64', 'memory_mb': 512, 'cpus': 2,
+                        'nodes': [{'name': 'c-node'}],
+                    }]},
+                },
+            },
+        )
+        simulation = Simulation(scenario)
+        edge_infra = simulation.regions['edge'].infrastructure
+        cloud_infra = simulation.regions['cloud'].infrastructure
+        self.assertEqual(edge_infra.rings['x86']._replicas, 1)
+        self.assertEqual(cloud_infra._load_balancer.mode, 'ArchitectureUnaware')
+        self.assertEqual(cloud_infra._load_balancer._replicas, 4)
 
 
 class WelfordTest(unittest.TestCase):

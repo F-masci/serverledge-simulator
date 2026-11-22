@@ -6,9 +6,9 @@ import logging
 from typing import TYPE_CHECKING
 
 from .notifications import (
-    ContainerStarted, ContainerStateChanged, ContainerStopped, NodeRegistered, Notification,
+    ContainerStarted, ContainerStateChanged, ContainerStopped, NodeRegistered, NodeRemoved, Notification,
     RequestAccepted, RequestArrived, RequestCompleted, RequestDelivered, RequestDequeued, RequestForwarded,
-    RequestQueued, RequestRejected,
+    RequestQueued, RequestRejected, RequestRejectionReturning,
 )
 from .notifications.node import ContainerSnapshot, ResourceSnapshot
 from ..model.container import ContainerState, DockerContainer
@@ -130,6 +130,14 @@ class Observer:
             queue_wait_s=queue_wait_s,
         ))
 
+    def notify_request_rejection_returning(self, request: Request) -> None:
+        """Notifica l'inizio del ritorno di un rifiuto da una regione remota."""
+        self.notify(RequestRejectionReturning(
+            **self._request_fields(request),
+            reason=request.rejection_reason or 'unknown',
+            node=request.node,
+        ))
+
     def notify_request_rejected(self, request: Request) -> None:
         """Notifica il rifiuto definitivo di una richiesta."""
         self.notify(RequestRejected(
@@ -165,6 +173,18 @@ class Observer:
             node,
             ResourceSnapshot.from_node(node),
             tuple(ContainerSnapshot(container, container.state) for container in containers),
+        ))
+
+    def notify_node_removed(self, node: Node) -> None:
+        """Pubblica la rimozione del nodo dalla topologia (scale-in)."""
+        ctx = self._ensure_context()
+        self.notify(NodeRemoved(
+            ctx.simulation.run_id,
+            ctx.engine.now,
+            node.region,
+            node.ring,
+            node,
+            ResourceSnapshot.from_node(node),
         ))
 
     def notify_container_state(

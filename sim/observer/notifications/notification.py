@@ -10,15 +10,17 @@ class NotificationType(StrEnum):
     CONTAINER_STARTED = 'container.started'              # Creazione riuscita: il container è pronto.
     CONTAINER_STOPPED = 'container.stopped'              # Rimozione di un container già avviato.
     CONTAINER_STATE_CHANGED = 'container.state_changed'  # Transizione di stato del container con snapshot risorse.
-    NODE_REGISTERED = 'node.registered'                  # Registrazione di un nodo nella replica.
+    NODE_REGISTERED = 'node.registered'                            # Registrazione di un nodo nella replica.
+    NODE_REMOVED = 'node.removed'                                  # Rimozione di un nodo dalla topologia (scale-in).
     SIMULATION_ERROR = 'simulation.error'                # Fallimento di un evento o della simulazione.
     REQUEST_ARRIVED = 'request.arrived'                  # Arrivo di una nuova invocazione nella regione di ingresso.
     REQUEST_QUEUED = 'request.queued'                    # Accodamento della richiesta nella FIFO del nodo.
     REQUEST_DEQUEUED = 'request.dequeued'                # Estrazione della richiesta dalla FIFO del nodo.
     REQUEST_FORWARDED = 'request.forwarded'              # Partenza della richiesta verso una regione remota.
     REQUEST_DELIVERED = 'request.delivered'              # Consegna della richiesta inoltrata nella regione remota.
-    REQUEST_ACCEPTED = 'request.accepted'                # Ammissione della richiesta su container o regione.
-    REQUEST_REJECTED = 'request.rejected'                # Rifiuto definitivo della richiesta.
+    REQUEST_ACCEPTED = 'request.accepted'                          # Ammissione della richiesta su container o regione.
+    REQUEST_REJECTION_RETURNING = 'request.rejection_returning'    # Rifiuto remoto in transito verso il client.
+    REQUEST_REJECTED = 'request.rejected'                          # Rifiuto definitivo della richiesta.
     REQUEST_COMPLETED = 'request.completed'              # Consegna della risposta e completamento della richiesta.
     FINAL_STATISTICS = 'simulation.final_statistics'     # Fotografia delle metriche al termine della replica.
 

@@ -53,10 +53,13 @@ class RoutingTest(unittest.TestCase):
         for pattern, expected in (
             ('', True), ('x86', True), ('large', True), ('x86-large/gpu', True),
             ('*/gpu/nvidia', True), ('^x86-.*/gpu.*$', True),
-            ('gpu, amd', False), ('x86-tiny/gpu', False), ('^[', False),
+            ('gpu, amd', False), ('x86-tiny/gpu', False),
         ):
             with self.subTest(pattern=pattern):
                 self.assertEqual(replace(function(), tag_pattern=pattern).supports_machine_tag(tag), expected)
+        for bad in ('^[', '^x86(?=/gpu)', '^x86(?!-arm)', '^x86(?>/gpu)$', r'^(x86)-\1$'):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, 'tag_pattern'):
+                replace(function(), tag_pattern=bad)
 
     def test_fallback_uses_registration_order_and_rejects_after_saturation(self):
         seed = 42
@@ -107,7 +110,7 @@ class RoutingTest(unittest.TestCase):
         self.assertEqual(rejected.rejection_reason, 'no_destination')
         self.assertEqual(regular.resources.used_cpus, 0)
 
-    def test_balancer_reuses_busy_multi_concurrency_container_at_full_cpu(self):
+    def test_balancer_checks_cpu_and_memory_strictly_like_go_proxy(self):
         infra = Infrastructure()
         infra.create_ring('r', arch='amd64', memory=128, cpus=1)
         node = infra.create_node('r', 'n1')
@@ -118,10 +121,15 @@ class RoutingTest(unittest.TestCase):
         node.creation_succeeded(first.container, 0)
         self.assertEqual(node.resources.available_cpus, 0)
 
+        # Il proxy Go controlla solo CPU/RAM disponibili (non gli slot busy di max_concurrency).
         second = Request(fun)
-        self.assertIs(infra.submit(second), node)
-        self.assertTrue(second.warm)
-        self.assertIs(second.container, first.container)
+        self.assertIsNone(infra.submit(second))
+        self.assertEqual(second.rejection_reason, 'out_of_resources')
+        # L'invocazione diretta sul nodo invece riusa il container busy.
+        direct = Request(fun)
+        self.assertIs(infra.submit(direct, node=node), node)
+        self.assertTrue(direct.warm)
+        self.assertIs(direct.container, first.container)
 
     def test_round_robin_balancer_cycles_compatible_rings_in_registration_order(self):
         infra = Infrastructure()
@@ -151,6 +159,33 @@ class RoutingTest(unittest.TestCase):
         # quindi la richiesta successiva riparte da 'first'.
         self.assertEqual(balancer.submit(Request(only_third), infra.rings.values()).id, 'third')
         self.assertEqual(balancer.submit(Request(all_gpu), infra.rings.values()).id, 'first')
+
+    def test_round_robin_discovers_new_tag_on_first_node_like_go(self):
+        infra = Infrastructure(RoundRobinLoadBalancer())
+        infra.create_ring('a', arch='amd64', memory=512, cpus=2, machine_tag='amd64/a')
+        infra.create_ring('b', arch='amd64', memory=512, cpus=2, machine_tag='amd64/b')
+        node_b = infra.create_node('b', 'nb', 'amd64/b')
+
+        # Con 'a' vuoto e 'b' attivo, la prima richiesta sceglie 'b' e _rr_index torna a 0.
+        self.assertIs(infra.submit(Request(function())), node_b)
+
+        # Aggiungendo il primo nodo ad 'a', 'a' entra in coda a [b, a]: la richiesta successiva sceglie ancora 'b'.
+        node_a = infra.create_node('a', 'na', 'amd64/a')
+        self.assertIs(infra.submit(Request(function())), node_b)
+        self.assertIs(infra.submit(Request(function())), node_a)
+
+    def test_round_robin_uses_eager_node_activation_order_before_first_request(self):
+        infra = Infrastructure(RoundRobinLoadBalancer())
+        infra.create_ring('a', arch='amd64', memory=512, cpus=2, machine_tag='amd64/a')
+        infra.create_ring('b', arch='amd64', memory=512, cpus=2, machine_tag='amd64/b')
+        node_b = infra.create_node('b', 'nb', 'amd64/b')
+        node_a = infra.create_node('a', 'na', 'amd64/a')
+        with self.assertRaisesRegex(ValueError, 'già presente'):
+            infra.create_node('a', 'nb', 'amd64/a')
+
+        # I nodi sono stati registrati in ordine b poi a: la prima richiesta deve scegliere b.
+        self.assertIs(infra.submit(Request(function())), node_b)
+        self.assertIs(infra.submit(Request(function())), node_a)
 
     def test_unavailable_balancers_fail_on_instantiation(self):
         with self.assertRaisesRegex(NotImplementedError, 'MAB'):

@@ -72,6 +72,9 @@ class _NodeResourceMetrics:
 class _NodeMetricsCollector(MetricCollector):
     """Raccoglie le prenotazioni di CPU e memoria per ogni nodo registrato nella replica."""
 
+    # FIXME (scale-in/scale-out): gestire NodeRemoved per chiudere TimedWelford al momento della
+    # rimozione del nodo e distinguere istanze che riusano lo stesso nome durante il drain.
+
     def __init__(self) -> None:
         self._by_node: dict[NodeKey, _NodeResourceMetrics] = {}
 

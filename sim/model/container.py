@@ -36,6 +36,7 @@ class DockerContainer:
         self._state = ContainerState.CREATING
         self._requests_count = 0
         self._expiration_time: float | None = None
+        self._evicted = False
 
         ### Callback ###
         
@@ -119,6 +120,11 @@ class DockerContainer:
         return self._expiration_time
 
     @property
+    def evicted(self) -> bool:
+        """Indica se il container è stato distrutto per pressione di memoria (eviction)."""
+        return self._evicted
+
+    @property
     def memory_limit_bytes(self) -> int:
         return self.function.memory_mb * 1048576
 
@@ -170,11 +176,12 @@ class DockerContainer:
             self._expiration_time = now + timeout
             self._handle_change_status(ContainerState.IDLE, self.on_idle)
 
-    def destroy(self) -> None:
+    def destroy(self, *, evicted: bool = False) -> None:
         """Segnala il container come distrutto."""
         self._ensure_statuses((ContainerState.IDLE, ContainerState.CREATING), 'Distruzione ordinaria consentita solo per idle o creazione fallita')
 
-        # Notifica prima di scollegare il nodo, così le callback possono ancora accedervi.
+        # Registra la causa della distruzione e notifica prima di scollegare il nodo.
+        self._evicted = evicted
         self._handle_change_status(ContainerState.DESTROYED, self.on_destroyed)
         self._node = None
 

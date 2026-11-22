@@ -10,6 +10,24 @@ _BASE_ARCHITECTURES = {'x86', 'x86_64', 'amd64', 'arm', 'arm64', 'aarch64'}
 ### Public API ###
 ##################
 
+# Costrutti PCRE/Python non supportati dal motore RE2 di Go (lookaround, atomic group e backreference).
+# Nota: altre sottigliezze RE2 (es. classi POSIX [[:alpha:]]) restano legate al motore regex Python.
+_UNSUPPORTED_RE2 = re.compile(r'(?<!\\)(?:\\\\)*\(\?(?:=|!|<=|<!|>)|(?<!\\)(?:\\\\)*\\[1-9]')
+
+
+def validate_tag_pattern(pattern: str) -> None:
+    """Valida il pattern secondo normalizeTagPatternForAPI di Go (intero pattern grezzo + RE2)."""
+    if not pattern:
+        return
+    if pattern.startswith('^') or pattern.endswith('$') or '.*' in pattern:
+        if _UNSUPPORTED_RE2.search(pattern) is not None:
+            raise ValueError(f'tag_pattern non supportato da RE2: {pattern!r}')
+        try:
+            re.compile(pattern)
+        except re.PatternError as error:
+            raise ValueError(f'tag_pattern non valido: {pattern!r}') from error
+
+
 def matches_machine_tag(machine_tag: str, pattern: str) -> bool:
     """Verifica che il machine tag soddisfi tutti i requisiti separati da virgola nel pattern."""
     if not pattern:

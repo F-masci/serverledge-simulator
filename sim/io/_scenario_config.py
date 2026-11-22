@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 
 from sim.model.function import Function, FunctionProfile
+from sim.model.load_balancer import LoadBalancerMode
 from sim.model.offloading import SchedulingPolicy
 from sim.model.region import RegionMode
 from sim.model.runtime import Runtime
@@ -166,7 +167,7 @@ class _RingConfig:
     machine_tag: str
     memory_mb: int
     cpus: float
-    replicas: int
+    replicas: int | None
     nodes: tuple[_NodeConfig, ...]
 
     @classmethod
@@ -185,7 +186,7 @@ class _RingConfig:
         ring_tag = nonempty_string(data['machine_tag'], 'ring.machine_tag') if 'machine_tag' in data else arch
         memory_mb = positive_integer(data['memory_mb'], 'ring.memory_mb')
         cpus = positive_number(data['cpus'], 'ring.cpus')
-        replicas = positive_integer(data.get('replicas', 128), 'ring.replicas')
+        replicas = positive_integer(data['replicas'], 'ring.replicas') if 'replicas' in data else None
 
         # Legge i nodi dichiarati nel ring e verifica unicità dei nomi e coerenza del machine_tag.
         definitions = data['nodes']
@@ -228,15 +229,21 @@ class _InfrastructureConfig:
         if not isinstance(definitions, list):
             raise ValueError('infrastructure.rings deve essere una lista')
 
-        # L'ordine dichiarato è significativo per il fallback tra ring; ogni machine_tag ha un solo ring.
+        # L'ordine dichiarato è significativo per il fallback tra ring; ogni machine_tag ha un solo ring
+        # e ogni nome di nodo è univoco nell'intera regione (come in internal/registration/registry.go).
         rings: dict[str, _RingConfig] = {}
         seen_tags: set[str] = set()
+        seen_nodes: set[str] = set()
         for definition in definitions:
             ring = _RingConfig.parse(definition)
             if ring.id in rings:
                 raise ValueError(f'Ring già definito: {ring.id}')
             if ring.machine_tag in seen_tags:
                 raise ValueError(f'Ring duplicato per il machine_tag: {ring.machine_tag}')
+            for node in ring.nodes:
+                if node.name in seen_nodes:
+                    raise ValueError(f'Nodo già definito nella regione: {node.name}')
+                seen_nodes.add(node.name)
             seen_tags.add(ring.machine_tag)
             rings[ring.id] = ring
         # Restituisce i ring validati nell'ordine dichiarato.
@@ -245,13 +252,15 @@ class _InfrastructureConfig:
 
 @dataclass(frozen=True)
 class _RegionConfig:
-    """Topologia, modalità di esecuzione e latenze di una regione."""
+    """Topologia, modalità di esecuzione, load balancer e latenze di una regione."""
 
     infrastructure: _InfrastructureConfig | None
     service_time_s: float = 0.0
     offload_latency_s: float = 0.0
     offload_latency_by_source_s: Mapping[str, float] = field(default_factory=lambda: MappingProxyType({}))
     has_load_balancer: bool = True
+    load_balancer: LoadBalancerMode | None = None
+    load_balancer_replicas: int | None = None
 
     @classmethod
     def parse(cls, name: str, data: object) -> '_RegionConfig':
@@ -261,7 +270,7 @@ class _RegionConfig:
         prefix = f'regions.{name}'
         allowed = {
             'mode', 'infrastructure', 'service_time_s', 'offload_latency_s', 'offload_latency_by_source_s',
-            'has_load_balancer',
+            'has_load_balancer', 'load_balancer', 'load_balancer_replicas',
         }
         if not isinstance(data, Mapping) or data.keys() - allowed:
             raise ValueError(f'Configurazione non valida per {prefix}')
@@ -279,17 +288,33 @@ class _RegionConfig:
 
         # Valida i campi specifici della modalità di esecuzione.
         mode = data.get('mode', RegionMode.SIMULATED)
+        load_balancer: LoadBalancerMode | None = None
+        load_balancer_replicas: int | None = None
         if mode == RegionMode.SIMULATED:
             if 'service_time_s' in data:
                 raise ValueError(f'{prefix}.service_time_s richiede mode = "{RegionMode.ALWAYS_SUCCEEDS.value}"')
             infrastructure = _InfrastructureConfig.parse(data.get('infrastructure'))
             service_time = 0.0
             has_load_balancer = _boolean(data.get('has_load_balancer', True), f'{prefix}.has_load_balancer')
+            if 'load_balancer' in data:
+                try:
+                    load_balancer = LoadBalancerMode(data['load_balancer'])
+                except ValueError as error:
+                    modes = ', '.join(LoadBalancerMode)
+                    raise ValueError(f'{prefix}.load_balancer deve essere uno tra {modes}') from error
+            if 'load_balancer_replicas' in data:
+                load_balancer_replicas = positive_integer(
+                    data['load_balancer_replicas'], f'{prefix}.load_balancer_replicas',
+                )
         elif mode == RegionMode.ALWAYS_SUCCEEDS:
             if 'infrastructure' in data:
                 raise ValueError(f'{prefix}.infrastructure richiede mode = "{RegionMode.SIMULATED.value}"')
             if 'has_load_balancer' in data:
                 raise ValueError(f'{prefix}.has_load_balancer richiede mode = "{RegionMode.SIMULATED.value}"')
+            if 'load_balancer' in data:
+                raise ValueError(f'{prefix}.load_balancer richiede mode = "{RegionMode.SIMULATED.value}"')
+            if 'load_balancer_replicas' in data:
+                raise ValueError(f'{prefix}.load_balancer_replicas richiede mode = "{RegionMode.SIMULATED.value}"')
             infrastructure = None
             service_time = nonnegative_number(data.get('service_time_s', 0), f'{prefix}.service_time_s')
             has_load_balancer = True
@@ -302,6 +327,8 @@ class _RegionConfig:
             offload_latency_s=latency,
             offload_latency_by_source_s=MappingProxyType(latency_by_source),
             has_load_balancer=has_load_balancer,
+            load_balancer=load_balancer,
+            load_balancer_replicas=load_balancer_replicas,
         )
 
 

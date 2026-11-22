@@ -106,6 +106,9 @@ class _ContainerMetrics:
 class _ContainerMetricsCollector(MetricCollector):
     """Raccoglie conteggi, transizioni, eviction, tempi di creazione e permanenza idle dei container."""
 
+    # FIXME (scale-in/scale-out): gestire NodeRemoved e distinguere i container_id in caso di
+    # riuso dello stesso nome nodo mentre il nodo precedente sta ancora drenando.
+
     def __init__(self) -> None:
         self._containers: dict[tuple[NodeKey | None, str | None], _ContainerMetrics] = {}
         self._by_ring: dict[RingKey, _ContainerMetrics] = {}
@@ -205,10 +208,9 @@ class _ContainerMetricsCollector(MetricCollector):
             idle_since = self._idle_started_at.pop(container_key, None)
             if idle_since is not None:
                 idle_duration = now - idle_since
-            # Distingue eviction forzata (prima della scadenza) da scadenza ordinaria per idle_timeout.
+            # Distingue eviction per pressione di memoria da scadenza ordinaria per idle_timeout.
             if event.state is ContainerState.DESTROYED:
-                expiration = event.container.expiration_time
-                evicted = expiration is None or now <= expiration
+                evicted = event.container.evicted
 
         for stats in self._scopes(key, event.function.name):
             stats.record_transition(

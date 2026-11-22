@@ -34,15 +34,22 @@ class LoadBalancer(ABC):
 
     mode: ClassVar[LoadBalancerMode]
 
+    def __init__(self) -> None:
+        # Ordine di prima attivazione dei ring (come b.architectures in generalLoadBalancer.go:
+        # un ring entra nell'ordine solo quando riceve il primo nodo).
+        self._discovered: list[ArchitectureRing] = []
+
     @staticmethod
-    def create(mode: LoadBalancerMode, *, seed: int, stream_id: str = 'load_balancer') -> 'LoadBalancer':
+    def create(
+        mode: LoadBalancerMode, *, seed: int, stream_id: str = 'load_balancer', replicas: int = 128,
+    ) -> 'LoadBalancer':
         """Costruisce il load balancer corrispondente alla modalità configurata nello scenario."""
         if mode is LoadBalancerMode.RANDOM:
             return RandomLoadBalancer(seed=seed, stream_id=stream_id)
         if mode is LoadBalancerMode.ROUND_ROBIN:
             return RoundRobinLoadBalancer()
         if mode is LoadBalancerMode.ARCHITECTURE_UNAWARE:
-            return ArchitectureUnawareLoadBalancer()
+            return ArchitectureUnawareLoadBalancer(replicas=replicas)
 
         # Le strategie non ancora modellate sollevano NotImplementedError in fase di costruzione.
         return _UNAVAILABLE_LOAD_BALANCERS[mode]()
@@ -59,17 +66,10 @@ class LoadBalancer(ABC):
         """Instrada l'invocazione sugli anelli compatibili e gestisce il fallback."""
         candidates = self.candidate_rings(request, rings)
 
-        # Privilegia l'esecuzione immediata su qualsiasi ring compatibile.
         for ring in candidates:
             destination = ring.submit(request, now=now)
             if request.status is not RequestStatus.CREATED:
                 # La risposta dello scheduler arriva dopo la selezione del proxy.
-                return destination
-
-        # A saturazione, consente accodamento FIFO o offloading sui nodi idonei.
-        for ring in candidates:
-            destination = ring.submit(request, now=now, allow_saturated=True)
-            if request.status is not RequestStatus.CREATED:
                 return destination
 
         request.reject('out_of_resources' if candidates else 'no_destination')
@@ -81,12 +81,27 @@ class LoadBalancer(ABC):
         """Restituisce l'anello primario selezionato per l'invocazione, o None se assente."""
         return next(iter(self.candidate_rings(request, rings)), None)
 
+    def on_node_added(self, ring: ArchitectureRing) -> None:
+        """Registra il ring nell'ordine di scoperta alla prima attivazione (come AddTarget in Go)."""
+        if ring not in self._discovered:
+            self._discovered.append(ring)
+
     def candidate_rings(
         self, request: Request, rings: Iterable[ArchitectureRing],
     ) -> tuple[ArchitectureRing, ...]:
-        """Restituisce l'anello primario seguito dagli altri anelli compatibili in ordine di registrazione."""
+        """Restituisce l'anello primario seguito dagli altri anelli compatibili in ordine di scoperta."""
         function = request.function
-        registered = tuple(rings)
+        current = tuple(rings)
+        current_set = set(current)
+
+        # Fallback lazy per usi isolati del balancer fuori da Infrastructure:
+        # registra eventuali ring non vuoti non ancora notificati tramite on_node_added.
+        self._discovered = [ring for ring in self._discovered if ring in current_set]
+        for ring in current:
+            if len(ring) and ring not in self._discovered:
+                self._discovered.append(ring)
+
+        registered = tuple(self._discovered)
 
         # Filtra gli anelli non vuoti compatibili per architettura e machine_tag
         # (1 ring = 1 machine_tag, come compatibleTagsForFunction in generalLoadBalancer.go).
@@ -142,6 +157,7 @@ class RandomLoadBalancer(LoadBalancer):
     mode = LoadBalancerMode.RANDOM
 
     def __init__(self, *, seed: int = 12345, stream_id: str = 'load_balancer') -> None:
+        super().__init__()
         # Stream PRNG deterministico dedicato alle scelte di routing della regione.
         self._rng = RandomStreams(seed).stream(StreamKind.ROUTING, stream_id)
 
@@ -173,7 +189,8 @@ class RoundRobinLoadBalancer(LoadBalancer):
     mode = LoadBalancerMode.ROUND_ROBIN
 
     def __init__(self) -> None:
-        # Indice circolare sull'elenco degli anelli registrati nella regione.
+        super().__init__()
+        # Indice circolare sull'elenco degli anelli scoperti nella regione.
         self._rr_index = 0
 
     #################################
@@ -216,6 +233,7 @@ class ArchitectureUnawareLoadBalancer(LoadBalancer):
     mode = LoadBalancerMode.ARCHITECTURE_UNAWARE
 
     def __init__(self, *, replicas: int = 128) -> None:
+        super().__init__()
         self._replicas = positive_integer(replicas, 'replicas')
         self._snapshot: tuple[Node, ...] = ()
         self._positions: list[int] = []
@@ -294,11 +312,6 @@ class ArchitectureUnawareLoadBalancer(LoadBalancer):
 
         # TODO: modellare NodeMetricCache del proxy come in ArchitectureUnawareBalancer.Next.
         node = next((c for c in candidates if c.can_allocate(function)), None)
-        if node is None:
-            node = next(
-                (c for c in candidates if c.can_enqueue(request) or c.can_offload_request(request)),
-                None,
-            )
         if node is None:
             request.reject('out_of_resources')
             return None

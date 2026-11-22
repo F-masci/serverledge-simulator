@@ -13,7 +13,7 @@ from sim.model.function import Function, FunctionProfile
 from sim.model.load_balancer import LoadBalancerMode
 from sim.model.runtime import BuiltinRuntime, CustomRuntime, Runtime
 from sim.random.streams import RandomStreams
-from sim.utils.validation import nonempty_string, nonnegative_integer
+from sim.utils.validation import nonempty_string, nonnegative_integer, positive_integer
 from ._scenario_config import (
     _ContainersConfig, _FunctionConfig, _InfrastructureConfig, _InvocationConfig, _RegionConfig, _SchedulerConfig,
 )
@@ -30,6 +30,7 @@ class Scenario:
     primary_region: str
     invocation: _InvocationConfig
     load_balancer: LoadBalancerMode
+    load_balancer_replicas: int | None
     seed: int = 12345
 
     def __init__(
@@ -38,7 +39,8 @@ class Scenario:
         *, infrastructure: Mapping[str, object] | None = None,
         containers: Mapping[str, object] | None = None,
         scheduler: Mapping[str, object] | None = None,
-        load_balancer: LoadBalancerMode | str = LoadBalancerMode.RANDOM,
+        load_balancer: LoadBalancerMode | str = LoadBalancerMode.ARCHITECTURE_UNAWARE,
+        load_balancer_replicas: int | None = None,
         invocation: Mapping[str, object] | None = None,
         regions: Mapping[str, object] | None = None,
         primary_region: str | None = None,
@@ -54,6 +56,12 @@ class Scenario:
             modes = ', '.join(LoadBalancerMode)
             raise ValueError(f'load_balancer deve essere uno tra {modes}') from error
         object.__setattr__(self, 'load_balancer', mode)
+        replicas = (
+            positive_integer(load_balancer_replicas, 'load_balancer_replicas')
+            if load_balancer_replicas is not None
+            else None
+        )
+        object.__setattr__(self, 'load_balancer_replicas', replicas)
         scheduler_config = _SchedulerConfig.parse(scheduler)
         object.__setattr__(self, 'scheduler', scheduler_config)
         containers_config = _ContainersConfig.parse(containers)
@@ -188,7 +196,7 @@ class Scenario:
         if not isinstance(data, dict):
             raise ValueError('Lo scenario deve essere una tabella')
         allowed = {'functions', 'function', 'seed', 'infrastructure', 'containers', 'scheduler',
-                   'load_balancer', 'invocation', 'regions', 'primary_region'}
+                   'load_balancer', 'load_balancer_replicas', 'invocation', 'regions', 'primary_region'}
         if unknown := data.keys() - allowed:
             raise ValueError(f'Parametri scenario sconosciuti: {sorted(map(str, unknown))}')
 
@@ -205,7 +213,8 @@ class Scenario:
             infrastructure=data.get('infrastructure'),
             containers=data.get('containers'),
             scheduler=data.get('scheduler'),
-            load_balancer=data.get('load_balancer', LoadBalancerMode.RANDOM),
+            load_balancer=data.get('load_balancer', LoadBalancerMode.ARCHITECTURE_UNAWARE),
+            load_balancer_replicas=data.get('load_balancer_replicas'),
             invocation=data.get('invocation'),
             regions=data.get('regions'),
             primary_region=data.get('primary_region'),

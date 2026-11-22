@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from sim.observer.notifications import (
     Notification, NotificationType, RequestAccepted, RequestArrived, RequestCompleted,
     RequestDelivered, RequestDequeued, RequestForwarded, RequestQueued, RequestRejected,
+    RequestRejectionReturning,
 )
 from sim.utils.welford import TimedWelford, Welford
 from .base import MetricCollector, NodeKey, RingKey, latency_percentiles, safe_ratio, timed_snapshot
@@ -155,6 +156,7 @@ class _InvocationMetricsCollector(MetricCollector):
             NotificationType.REQUEST_QUEUED,
             NotificationType.REQUEST_DEQUEUED,
             NotificationType.REQUEST_ACCEPTED,
+            NotificationType.REQUEST_REJECTION_RETURNING,
             NotificationType.REQUEST_REJECTED,
             NotificationType.REQUEST_COMPLETED,
         )
@@ -242,6 +244,7 @@ class _InvocationMetricsCollector(MetricCollector):
         match notification:
             case RequestArrived(region=region) if region is not None:
                 self._external_arrivals[region.name] += 1
+                self._by_region.setdefault(region.name, _InvocationMetrics())
             case RequestForwarded(source_region=source, region=destination) if destination is not None:
                 self._offloads[source.name, destination.name] += 1
                 for stats in self._scopes(notification.function.name, destination.name):
@@ -251,7 +254,15 @@ class _InvocationMetricsCollector(MetricCollector):
                 region_name = notification.region.name if notification.region is not None else None
                 for stats in self._scopes(notification.function.name, region_name):
                     stats.in_transit -= 1
+            case RequestRejectionReturning():
+                region_name = notification.region.name if notification.region is not None else None
+                for stats in self._scopes(notification.function.name, region_name):
+                    stats.in_transit += 1
             case RequestQueued() | RequestDequeued() | RequestAccepted() | RequestRejected() | RequestCompleted():
+                if isinstance(notification, RequestRejected) and notification.request.return_delay > 0:
+                    region_name = notification.region.name if notification.region is not None else None
+                    for stats in self._scopes(notification.function.name, region_name):
+                        stats.in_transit -= 1
                 self._record_outcome(notification)
 
     def _track_intra_region_offload(

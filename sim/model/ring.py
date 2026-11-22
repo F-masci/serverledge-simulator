@@ -154,7 +154,10 @@ class ArchitectureRing:
                 del self._targets[position]
                 self._positions.pop(bisect_left(self._positions, position))
 
-        node._ring = None
+        # Mantiene node._ring integro per consentire il drain delle invocazioni e dei
+        # container già in volo; il nodo è comunque escluso dal routing (node not in self).
+        if self._node_bindings is not None and self._node_bindings.on_node_removed is not None:
+            self._node_bindings.on_node_removed(node)
         if self.on_node_removed is not None:
             self.on_node_removed(self, node)
 
@@ -200,25 +203,14 @@ class ArchitectureRing:
 
     ## Request management ##
 
-    def submit(
-        self, request: Request, *, now: float = 0.0, allow_saturated: bool = False,
-    ) -> Node | None:
+    def submit(self, request: Request, *, now: float = 0.0) -> Node | None:
         """Seleziona un nodo idoneo con l'hash e gli consegna l'invocazione."""
         request.ensure_created()
         function = request.function
 
         # TODO: modellare NodeMetricCache del proxy (polling periodico /status,
         # decremento ottimistico in Next() e riconciliazione tramite header di risposta).
-        if allow_saturated:
-            node = next(
-                (
-                    c for c in self._candidates(function)
-                    if c.can_enqueue(request) or c.can_offload_request(request)
-                ),
-                None,
-            )
-        else:
-            node = next((c for c in self._candidates(function) if c.can_allocate(function)), None)
+        node = next((c for c in self._candidates(function) if c.can_allocate(function)), None)
         if node is None:
             return None
 

@@ -372,7 +372,7 @@ class Request:
             'rejection_reason': self._rejection_reason,
             'entry_region': self._entry_region.name if self._entry_region is not None else None,
             'region': self._region.name if self._region is not None else None,
-            'ring_id': self.ring.id if node is not None else None,
+            'ring_id': node.ring.id if node is not None and node._ring is not None else None,
             'offloaded_from_node_id': self._offloaded_from.id.key if self._offloaded_from is not None else None,
         }
 
