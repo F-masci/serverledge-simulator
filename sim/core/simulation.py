@@ -1,7 +1,7 @@
 """Coordinamento degli arrivi sul calendario della simulazione."""
 
-from copy import deepcopy
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import partial
 from math import floor
@@ -19,10 +19,9 @@ from sim.model.offloading import NodeScheduling
 from sim.model.region import Region
 from sim.model.request import Request, RequestStatus
 from sim.observer import FinalStatistics, SimulationError
-from sim.observer.observer import _Observer, observer as shared_observer
+from sim.observer.observer import Observer, observer as shared_observer
 from sim.utils.report import format_metrics
 from sim.utils.validation import nonnegative_integer
-
 from .engine import SimulationEngine
 from .metrics import SimulationMetrics
 
@@ -39,13 +38,13 @@ class SimulationContext:
     simulation: 'Simulation'
     regions: Mapping[str, Region]
     metrics: SimulationMetrics
-    observer: _Observer = field(init=False, repr=False, compare=False)
+    observer: Observer = field(init=False, repr=False, compare=False)
     engine: SimulationEngine = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         # Inizializza il motore con il contesto.
         object.__setattr__(self, 'engine', SimulationEngine(self))
-        observer = _Observer(self, parent=shared_observer)
+        observer = Observer(self, parent=shared_observer)
         observer.subscribe(self.metrics.on_notification, propagate_errors=True)
         object.__setattr__(self, 'observer', observer)
 
@@ -245,16 +244,14 @@ class Simulation:
         if delay == 0:
             self._ctx.observer.notify_request_delivered(request)
             return destination.submit(request, now=self.now, node=target)
-        self._ctx.engine.schedule_after(delay, RegionDeliveryEvent(request, destination, target, ctx=self._ctx))
-        return None
 
-    def deliver_region(self, request: Request, region: Region, node: Node | None = None) -> None:
-        now = self.now
-        self._ctx.observer.notify_request_delivered(request)
-        region.submit(request, now=now, node=node)
-        self._notify_request_submission(request)
-        if request.status is RequestStatus.ACCEPTED:
-            self._schedule_execution(request)
+        delivery_event = RegionDeliveryEvent(
+            ctx=self._ctx, request=request, region=destination, node=target,
+            on_request_submitted = self._notify_request_submission,
+            on_request_accepted = self._schedule_execution,
+        )
+        self._ctx.engine.schedule_after(delay, delivery_event)
+        return None
 
     def _bind_node_callbacks(self, node: Node, region: str, ring_id: str) -> None:
         """Associa le callback per gli eventi dei nodi."""
@@ -282,7 +279,7 @@ class Simulation:
             if duration is None:
                 raise ValueError('La durata di servizio della richiesta non può essere None')
 
-            completion = CompletionEvent(request, ctx=self._ctx)
+            completion = CompletionEvent(ctx=self._ctx, request=request)
             if request.node is None and duration == 0:
                 completion.execute()
             else:
@@ -295,7 +292,8 @@ class Simulation:
             if cold_start_time is None:
                 raise ValueError('Il tempo di cold start della funzione non può essere None')
 
-            self._ctx.engine.schedule_after(cold_start_time, ContainerReadyEvent(request, ctx=self._ctx),)
+            container_ready_event = ContainerReadyEvent(ctx=self._ctx, request=request)
+            self._ctx.engine.schedule_after(cold_start_time, container_ready_event)
 
     def _request_dequeued(self, node: Node, request: Request) -> None:
         """Notifica l'ammissione della richiesta uscita dalla FIFO."""

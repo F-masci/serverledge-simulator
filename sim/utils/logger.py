@@ -4,7 +4,6 @@ import logging
 
 from ..observer.notifications import Notification
 
-
 _logger = logging.getLogger('sim.notifications')
 
 

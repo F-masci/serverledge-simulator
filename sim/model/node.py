@@ -3,22 +3,22 @@
 I contatori busy/warm rappresentano prenotazioni, non consumo fisico misurato.
 """
 from __future__ import annotations
-from .request import Request, RequestStatus
-from sim.utils.validation import finite_time, integer, nonnegative_number
 
+import json
+from collections import deque
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
 from itertools import count
-import json
 from types import MappingProxyType
 from typing import TYPE_CHECKING
-from collections import deque
-from collections.abc import Callable, Iterator, Mapping
 
+from sim.utils.validation import integer, nonnegative_number
+from .container import DockerContainer
 from .function import Function
-from .container import DockerContainer, ContainerState
-from .pool import ContainerPool
 from .offloading import NodeScheduling, OffloadingScheduler
+from .pool import ContainerPool
+from .request import Request
 
 if TYPE_CHECKING:
     from .region import Region

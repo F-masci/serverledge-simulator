@@ -4,13 +4,13 @@ import argparse
 import logging
 from pathlib import Path
 
-from .io.scenario import Scenario
 from .core.simulation import Simulation
+from .io.scenario import Scenario
 from .observer import SimulationError, observer
 from .utils.logger import log_notification
 from .utils.report import format_final_report
-
 from .utils.validation import nonnegative_integer
+
 
 def main() -> None:
 

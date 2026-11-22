@@ -1,8 +1,8 @@
 """Anello dei nodi di una singola architettura."""
 
+import json
 from bisect import bisect_left
 from collections.abc import Callable, Iterator
-import json
 from typing import TYPE_CHECKING
 
 from .function import Function

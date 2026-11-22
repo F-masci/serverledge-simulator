@@ -1,13 +1,12 @@
 """Richiesta di invocazione e risultato dell'ammissione sul nodo."""
 
+import json
 from collections.abc import Callable
 from enum import Enum
-import json
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from .function import Function
-from ..utils.ensure import ensure_container
 
 if TYPE_CHECKING:
     from .container import DockerContainer

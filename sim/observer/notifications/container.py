@@ -4,7 +4,6 @@ from dataclasses import asdict, dataclass, field
 from logging import DEBUG, INFO
 
 from sim.model.container import ContainerState
-
 from .node import ResourceSnapshot
 from .notification import Notification, NotificationType
 

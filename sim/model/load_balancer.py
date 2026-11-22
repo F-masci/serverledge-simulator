@@ -6,9 +6,8 @@ from enum import StrEnum
 from typing import Never
 
 from sim.random.streams import RandomStreams, StreamKind
-
-from .ring import ArchitectureRing
 from .request import Request
+from .ring import ArchitectureRing
 
 
 class LoadBalancerMode(StrEnum):

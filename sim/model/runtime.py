@@ -7,7 +7,6 @@ from typing import ClassVar
 
 from sim.utils.validation import finite_time, nonempty_string
 
-
 _BUILTIN_IMAGES = {
     'python314': 'grussorusso/serverledge-python314',
     'python312ml': 'grussorusso/serverledge-python312ml',

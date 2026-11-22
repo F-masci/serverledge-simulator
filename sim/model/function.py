@@ -9,8 +9,7 @@ from sim.random.distributions import (
 from sim.random.streams import RandomStreams
 from sim.utils.machine_tag import matches_machine_tag
 from sim.utils.validation import nonnegative_number, one_of, positive_number
-
-from .runtime import BuiltinRuntime as BuiltinRuntime, CustomRuntime, Runtime
+from .runtime import CustomRuntime, Runtime
 
 
 @dataclass(frozen=True)

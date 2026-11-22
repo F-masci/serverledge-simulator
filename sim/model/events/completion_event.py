@@ -2,8 +2,8 @@
 
 from dataclasses import dataclass
 
-from ..request import Request, RequestStatus
 from .event import Event
+from ..request import Request, RequestStatus
 
 
 @dataclass(frozen=True)

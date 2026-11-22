@@ -1,26 +1,19 @@
 """Arrivo di una richiesta di invocazione."""
 
 from dataclasses import dataclass
-from typing import Callable
 
+from .event import RequestEvent
 from ..function import Function
 from ..node import Node
 from ..region import Region
-from ..request import Request, RequestStatus
-from .event import Event
+from ..request import Request
 
 
 @dataclass(frozen=True)
-class ArrivalEvent(Event):
+class ArrivalEvent(RequestEvent):
     function: Function
     entry_region: Region
     entry_node: 'Node | None'
-
-    ### Callback ###
-    on_request_submitted: Callable[[Request], None] | None = None
-    on_request_accepted: Callable[[Request], None] | None = None
-    on_request_rejected: Callable[[Request], None] | None = None
-    on_request_queued: Callable[[Request], None] | None = None
 
     #################################
     ### Internal state management ###
@@ -62,20 +55,3 @@ class ArrivalEvent(Event):
         # Inoltra la richiesta nella regione di ingresso.
         self.entry_region.submit(request, now=engine.now, node=self.entry_node)
         self._handle_callback(request)
-
-    ## Callback handling ##
-
-    def _handle_callback(self, request: Request) -> None:
-        """Invoca il callback corrispondente allo stato della richiesta."""
-        if self.on_request_submitted is not None:
-            self.on_request_submitted(request)
-
-        if request.status is RequestStatus.ACCEPTED:
-            if self.on_request_accepted is not None:
-                self.on_request_accepted(request)
-        elif request.status is RequestStatus.REJECTED:
-            if self.on_request_rejected is not None:
-                self.on_request_rejected(request)
-        elif request.status is RequestStatus.QUEUED:
-            if self.on_request_queued is not None:
-                self.on_request_queued(request)

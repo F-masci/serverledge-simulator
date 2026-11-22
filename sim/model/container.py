@@ -1,10 +1,11 @@
 """Stato logico di un container Docker, senza accesso al daemon."""
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from enum import Enum
-import json
 from typing import TYPE_CHECKING
+
 from .function import Function
 from ..utils.validation import finite_time
 

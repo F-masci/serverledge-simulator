@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 
 from sim.model.function import Function, FunctionProfile
-from sim.model.runtime import Runtime
 from sim.model.offloading import SchedulingPolicy
+from sim.model.runtime import Runtime
 from sim.utils.validation import finite_time, integer, nonempty_string, positive_integer, positive_number, \
     nonnegative_number
 

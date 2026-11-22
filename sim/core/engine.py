@@ -5,10 +5,8 @@ from heapq import heappop, heappush
 from itertools import count
 from typing import TYPE_CHECKING
 
+from sim.model.events import Event, ScheduledEvent
 from sim.utils.validation import finite_time, finite_delay
-
-from sim.model.events import Event, EventStatus, ScheduledEvent
-
 
 if TYPE_CHECKING:
     from .simulation import SimulationContext
@@ -63,7 +61,7 @@ class SimulationEngine:
         # lo stesso tempo.
         seq_number = next(self._sequence)
 
-        scheduled_event = ScheduledEvent(time, event, ctx=self.ctx)
+        scheduled_event = ScheduledEvent(event, ctx=self.ctx)
         calendar_entry = _CalendarEntry(time, seq_number, scheduled_event)
         heappush(self._calendar, calendar_entry)
 
@@ -74,18 +72,8 @@ class SimulationEngine:
         delay = finite_delay(delay, 'delay')
         return self.schedule(self.now + delay, event)
 
-    def _discard_cancelled(self) -> None:
-        """Rimuove le occorrenze cancellate dal calendario."""
-        if not self._calendar:
-            return
-
-        # Cancellazione lazy: le occorrenze vengono rimosse quando affiorano.
-        while self._calendar and self._calendar[0].scheduled_event.status is EventStatus.CANCELLED:
-            heappop(self._calendar)
-
     def _execute_next(self) -> bool:
         """Esegue l'evento successivo; False se il calendario è esaurito."""
-        self._discard_cancelled()
         if not self._calendar:
             return False
 

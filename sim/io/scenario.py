@@ -1,20 +1,19 @@
 """Lettura dei parametri di scenario da formati diversi."""
 
+import json
+import tomllib
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
-import json
 from pathlib import Path
-import tomllib
 from types import MappingProxyType
 from typing import TextIO
 
 from sim.model.function import Function, FunctionProfile
-from sim.model.runtime import BuiltinRuntime, CustomRuntime, Runtime
 from sim.model.load_balancer import LoadBalancerMode
+from sim.model.runtime import BuiltinRuntime, CustomRuntime, Runtime
 from sim.random.streams import RandomStreams
 from sim.utils.validation import nonempty_string, nonnegative_integer
-
 from ._scenario_config import (
     _ContainersConfig, _FunctionConfig, _InfrastructureConfig, _InvocationConfig, _RegionConfig, _SchedulerConfig,
 )

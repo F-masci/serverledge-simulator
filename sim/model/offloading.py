@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from itertools import islice
-import json
 from typing import TYPE_CHECKING
 
 from .request import Request

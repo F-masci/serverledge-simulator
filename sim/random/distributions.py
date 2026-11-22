@@ -3,7 +3,6 @@
 from abc import ABC, abstractmethod
 
 from sim.utils.validation import positive_number
-
 from .streams import RandomStreams, StreamKind
 
 

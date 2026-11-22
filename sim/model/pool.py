@@ -3,11 +3,11 @@
 Le modifiche sono riservate al nodo, che coordina la contabilità delle risorse.
 """
 
-from collections.abc import Iterator
 import json
+from collections.abc import Iterator
 from typing import Callable
 
-from .container import DockerContainer, ContainerState
+from .container import DockerContainer
 from .function import Function
 
 

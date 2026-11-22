@@ -5,7 +5,6 @@ from logging import DEBUG
 
 from sim.model.container import ContainerState
 from sim.model.node import Node
-
 from .notification import Notification, NotificationType
 
 

@@ -1,7 +1,7 @@
 """Distribuzione sincrona delle notifiche della replica e del processo."""
 
-from collections.abc import Callable
 import logging
+from collections.abc import Callable
 from itertools import chain
 from typing import TYPE_CHECKING
 
@@ -20,9 +20,9 @@ if TYPE_CHECKING:
     from ..model.region import Region
 
 
-class _Observer:
+class Observer:
     def __init__(
-        self, ctx: 'SimulationContext | None' = None, *, parent: '_Observer | None' = None,
+        self, ctx: 'SimulationContext | None' = None, *, parent: 'Observer | None' = None,
     ) -> None:
         self._ctx = ctx
         self._parent = parent
@@ -164,4 +164,4 @@ class _Observer:
         ))
 
 
-observer = _Observer()
+observer = Observer()
