@@ -3,17 +3,15 @@
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from functools import partial
 from math import floor
 from types import MappingProxyType
 from uuid import uuid4
 
+from sim.bindings import NodeBindings
 from sim.io.scenario import Scenario
 from sim.model.container import DockerContainer
 from sim.model.events import ArrivalEvent, CompletionEvent, ContainerCleanupEvent, ContainerReadyEvent, ScheduledEvent
 from sim.model.events.region_delivery_event import RegionDeliveryEvent
-from sim.model.infrastructure import Infrastructure
-from sim.model.load_balancer import LoadBalancer
 from sim.model.node import Node
 from sim.model.offloading import NodeScheduling
 from sim.model.region import Region
@@ -36,17 +34,19 @@ class SimulationContext:
 
     scenario: Scenario
     simulation: 'Simulation'
-    regions: Mapping[str, Region]
     metrics: SimulationMetrics
+    regions: Mapping[str, Region] = field(init=False)
     observer: Observer = field(init=False, repr=False, compare=False)
     engine: SimulationEngine = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        # Inizializza il motore con il contesto.
+        # Inizializza il motore e l'observer prima della costruzione delle regioni,
+        # così i binding applicati alla creazione dei nodi trovano il contesto pronto.
         object.__setattr__(self, 'engine', SimulationEngine(self))
         observer = Observer(self, parent=shared_observer)
         observer.subscribe(self.metrics.on_notification, propagate_errors=True)
         object.__setattr__(self, 'observer', observer)
+        object.__setattr__(self, 'regions', MappingProxyType({}))
 
     @property
     def now(self) -> float:
@@ -62,13 +62,14 @@ class Simulation:
         # Inizializza la simulazione con uno scenario e genera un identificatore univoco per la replica.
         self.run_id = uuid4().hex
 
-        # Costruisce il contesto della simulazione, che include l'infrastruttura e le metriche.
+        # Costruisce il contesto della simulazione (motore, observer e metriche)
+        # e popola le regioni con i binding di ciclo di vita dei nodi.
         self._ctx = SimulationContext(
             scenario=scenario,
             simulation=self,
-            regions=self._build_regions(scenario),
             metrics=SimulationMetrics(),
         )
+        object.__setattr__(self._ctx, 'regions', self._build_regions(scenario))
 
         # Determina la regione di ingresso e il nodo di ingresso,
         # se specificato nello scenario.
@@ -104,43 +105,18 @@ class Simulation:
         return self._ctx.regions
 
     def _build_regions(self, scenario: Scenario) -> Mapping[str, Region]:
-        regions = {}
-        for name, config in scenario.regions.items():
-            build_infrastructure = (
-                partial(self._build_infrastructure, scenario) if config.infrastructure is not None else None
+        """Costruisce tutte le regioni dello scenario con i binding dei nodi e configura gli scheduler."""
+        node_bindings = self._build_node_bindings()
+        regions = {
+            name: Region(
+                name, scenario=scenario,
+                forward_region=self._forward_region,
+                node_bindings=node_bindings,
             )
-            regions[name] = Region(
-                name, build_infrastructure=build_infrastructure, service_time_s=config.service_time_s,
-                offload_latency_s=config.offload_latency_s,
-                offload_latency_by_source_s=config.offload_latency_by_source_s,
-                has_load_balancer=config.has_load_balancer,
-            )
+            for name in scenario.regions
+        }
         self._configure_schedulers(scenario, regions)
         return MappingProxyType(regions)
-
-    def _build_infrastructure(self, scenario: Scenario, region: Region) -> Infrastructure:
-        """Crea ring e nodi della singola regione."""
-        name = region.name
-        config = scenario.regions[name].infrastructure
-        assert config is not None
-        stream_id = 'load_balancer' if name == scenario.primary_region else f'load_balancer/{name}'
-        load_balancer = LoadBalancer.create(scenario.load_balancer, seed=scenario.seed, stream_id=stream_id)
-        infrastructure = Infrastructure(
-            load_balancer,
-            forward_region=self._forward_region,
-            region=region,
-        )
-        for ring in config.rings:
-            infrastructure.create_ring(
-                ring.id, arch=ring.arch, memory=ring.memory_mb, cpus=ring.cpus, replicas=ring.replicas,
-            )
-            for node in ring.nodes:
-                infrastructure.create_node(
-                    ring.id, node.name, node.machine_tag,
-                    idle_timeout=scenario.containers.idle_timeout,
-                    queue_capacity=scenario.scheduler.queue_capacity,
-                )
-        return infrastructure
 
     @staticmethod
     def _configure_schedulers(scenario: Scenario, regions: Mapping[str, Region]) -> None:
@@ -192,19 +168,6 @@ class Simulation:
         """Pianifica un primo arrivo per ogni funzione, in ordine di configurazione."""
         if self._started:
             raise RuntimeError('Simulazione già avviata')
-
-        # Inizializza l'infrastruttura e registra i nodi
-        # per la raccolta delle metriche.
-        #
-        # Imposta le callback per il tracciamento dello stato dei container
-        # e la pulizia dei container idle.
-        for region in self.regions.values():
-            if region.infrastructure is None:
-                continue
-            for ring_id, ring in region.infrastructure.rings.items():
-                for node in ring:
-                    self._ctx.observer.notify_node_registered(node, region.name, ring_id)
-                    self._bind_node_callbacks(node, region.name, ring_id)
 
         # Pianifica il primo arrivo per ogni funzione registrata nello scenario.
         first_arrivals = []
@@ -336,11 +299,14 @@ class Simulation:
 
     ## Binding ##
 
-    def _bind_node_callbacks(self, node: Node, region: str, ring_id: str) -> None:
-        """Associa le callback per gli eventi dei nodi."""
-        node.on_container_state_changed = partial(self._ctx.observer.notify_container_state, region, ring_id)
-        node.on_container_idle = self._schedule_container_cleanup
-        node.on_request_dequeued = self._request_dequeued
+    def _build_node_bindings(self) -> NodeBindings:
+        """Costruisce i binding di ciclo di vita per ogni nodo creato."""
+        return NodeBindings(
+            on_node_registered=self._ctx.observer.notify_node_registered,
+            on_container_state_changed=self._ctx.observer.notify_container_state,
+            on_container_idle=self._schedule_container_cleanup,
+            on_request_dequeued=self._request_dequeued,
+        )
 
     #############################
     ### Notification handlers ###

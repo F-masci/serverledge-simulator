@@ -3,7 +3,8 @@
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from enum import StrEnum
-from typing import Never
+import json
+from typing import ClassVar, Never
 
 from sim.random.streams import RandomStreams, StreamKind
 from .request import Request
@@ -26,6 +27,8 @@ class LoadBalancer(ABC):
     supportata e almeno un nodo compatibile con il machine tag) e determina l'ordine
     con cui l'infrastruttura tenta la consegna dell'invocazione.
     """
+
+    mode: ClassVar[LoadBalancerMode]
 
     @staticmethod
     def create(mode: LoadBalancerMode, *, seed: int, stream_id: str = 'load_balancer') -> 'LoadBalancer':
@@ -85,9 +88,33 @@ class LoadBalancer(ABC):
     ) -> int:
         """Sceglie l'indice dell'anello primario tra i candidati compatibili."""
 
+    #####################
+    ### Serialization ###
+    #####################
+
+    def __str__(self) -> str:
+        """Restituisce una descrizione leggibile del load balancer."""
+        return f'{type(self).__name__}(mode={self.mode.value})'
+
+    def to_dict(self) -> dict:
+        """Restituisce la configurazione del load balancer in formato serializzabile."""
+        return {
+            'type': type(self).__name__,
+            'mode': self.mode.value,
+        }
+
+    def to_json(self) -> str:
+        """Serializza il load balancer per la stampa o l'esportazione."""
+        return json.dumps(self.to_dict(), ensure_ascii=False, allow_nan=False)
+
+    def __repr__(self) -> str:
+        return f'<{type(self).__name__} mode={self.mode.value}>'
+
 
 class RandomLoadBalancer(LoadBalancer):
     """Seleziona casualmente l'anello primario tra quelli compatibili."""
+
+    mode = LoadBalancerMode.RANDOM
 
     def __init__(self, *, seed: int = 12345, stream_id: str = 'load_balancer') -> None:
         # Stream PRNG deterministico dedicato alle scelte di routing della regione.
@@ -117,6 +144,8 @@ class RoundRobinLoadBalancer(LoadBalancer):
     mantiene un indice globale sugli anelli registrati e li scorre in modo
     circolare fino al primo anello compatibile con la richiesta.
     """
+
+    mode = LoadBalancerMode.ROUND_ROBIN
 
     def __init__(self) -> None:
         # Indice circolare sull'elenco degli anelli registrati nella regione.

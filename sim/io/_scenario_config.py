@@ -6,6 +6,7 @@ from types import MappingProxyType
 
 from sim.model.function import Function, FunctionProfile
 from sim.model.offloading import SchedulingPolicy
+from sim.model.region import RegionMode
 from sim.model.runtime import Runtime
 from sim.utils.validation import finite_time, integer, nonempty_string, positive_integer, positive_number, \
     nonnegative_number
@@ -264,23 +265,23 @@ class _RegionConfig:
             latency_by_source[source] = nonnegative_number(duration, f'{by_source_field}.{source}')
 
         # Valida i campi specifici della modalità di esecuzione.
-        mode = data.get('mode', 'simulated')
-        if mode == 'simulated':
+        mode = data.get('mode', RegionMode.SIMULATED)
+        if mode == RegionMode.SIMULATED:
             if 'service_time_s' in data:
-                raise ValueError(f'{prefix}.service_time_s richiede mode = "always_succeeds"')
+                raise ValueError(f'{prefix}.service_time_s richiede mode = "{RegionMode.ALWAYS_SUCCEEDS.value}"')
             infrastructure = _InfrastructureConfig.parse(data.get('infrastructure'))
             service_time = 0.0
             has_load_balancer = _boolean(data.get('has_load_balancer', True), f'{prefix}.has_load_balancer')
-        elif mode == 'always_succeeds':
+        elif mode == RegionMode.ALWAYS_SUCCEEDS:
             if 'infrastructure' in data:
-                raise ValueError(f'{prefix}.infrastructure richiede mode = "simulated"')
+                raise ValueError(f'{prefix}.infrastructure richiede mode = "{RegionMode.SIMULATED.value}"')
             if 'has_load_balancer' in data:
-                raise ValueError(f'{prefix}.has_load_balancer richiede mode = "simulated"')
+                raise ValueError(f'{prefix}.has_load_balancer richiede mode = "{RegionMode.SIMULATED.value}"')
             infrastructure = None
             service_time = nonnegative_number(data.get('service_time_s', 0), f'{prefix}.service_time_s')
             has_load_balancer = True
         else:
-            raise ValueError(f'{prefix}.mode deve essere simulated o always_succeeds')
+            raise ValueError(f'{prefix}.mode deve essere {RegionMode.SIMULATED.value} o {RegionMode.ALWAYS_SUCCEEDS.value}')
 
         return cls(
             infrastructure=infrastructure,

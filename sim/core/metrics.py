@@ -304,7 +304,7 @@ class SimulationMetrics:
     def snapshot(self, now: float, regions: Mapping[str, Region], primary_region: str) -> dict:
         regional = {
             name: {
-                'mode': region.mode,
+                'mode': region.mode.value,
                 'external_arrivals': self._external_arrivals[name],
                 'invocations': (
                     self._by_region[name].snapshot() if name in self._by_region else _InvocationMetrics().snapshot()

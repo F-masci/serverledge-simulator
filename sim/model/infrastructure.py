@@ -1,6 +1,7 @@
 """Infrastruttura organizzata in anelli omogenei identificati esplicitamente."""
 
 from collections.abc import Callable, Mapping
+import json
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
@@ -12,6 +13,7 @@ from .ring import ArchitectureRing
 from ..utils.validation import nonempty_string
 
 if TYPE_CHECKING:
+    from sim.bindings import NodeBindings
     from .region import Region
 
 
@@ -22,11 +24,13 @@ class Infrastructure:
         self, load_balancer: LoadBalancer | None = None, *,
         forward_region: Callable[[Request, 'Region', Node], Node | None] | None = None,
         region: 'Region | None' = None,
+        node_bindings: 'NodeBindings | None' = None,
     ) -> None:
         self._rings: dict[str, ArchitectureRing] = {}
         self._region = region
         self._load_balancer = RandomLoadBalancer() if load_balancer is None else load_balancer
         self._forward_region = forward_region
+        self._node_bindings = node_bindings
 
         ### Callback ###
         self.on_ring_created: Callable[[Infrastructure, ArchitectureRing], None] | None = None
@@ -64,7 +68,10 @@ class Infrastructure:
         if arch is None or memory is None or cpus is None:
             raise ValueError('Un nuovo anello richiede architettura, CPU e memoria')
         replicas = 128 if replicas is None else replicas
-        ring = ArchitectureRing(ring_id, arch, memory, cpus, infrastructure=self, replicas=replicas)
+        ring = ArchitectureRing(
+            ring_id, arch, memory, cpus, infrastructure=self, replicas=replicas,
+            node_bindings=self._node_bindings,
+        )
 
         # Registra l'anello prima di notificare la creazione.
         self._rings[ring_id] = ring
@@ -153,3 +160,28 @@ class Infrastructure:
             request.reject('no_destination')
             return None
         return self._forward_region(request, target, source)
+
+    #####################
+    ### Serialization ###
+    #####################
+
+    def __str__(self) -> str:
+        """Restituisce una descrizione leggibile dell'infrastruttura."""
+        region = self._region.name if self._region is not None else None
+        return f'Infrastructure(region={region}, rings={len(self._rings)})'
+
+    def to_dict(self) -> dict:
+        """Restituisce la topologia e lo stato dell'infrastruttura in formato serializzabile."""
+        return {
+            'region': self._region.name if self._region is not None else None,
+            'load_balancer': self._load_balancer.to_dict(),
+            'rings': {ring_id: ring.to_dict() for ring_id, ring in self._rings.items()},
+        }
+
+    def to_json(self) -> str:
+        """Serializza l'infrastruttura per la stampa o l'esportazione."""
+        return json.dumps(self.to_dict(), ensure_ascii=False, allow_nan=False)
+
+    def __repr__(self) -> str:
+        region = self._region.name if self._region is not None else None
+        return f'<Infrastructure region={region} rings={len(self._rings)}>'

@@ -11,6 +11,7 @@ from .request import Request
 from ..utils.validation import nonempty_string, positive_integer, positive_number
 
 if TYPE_CHECKING:
+    from sim.bindings import NodeBindings
     from .region import Region
     from .infrastructure import Infrastructure
 
@@ -23,7 +24,15 @@ class ArchitectureRing:
     """
 
     def __init__(
-        self, ring_id: str, arch: str, memory: int, cpus: float, infrastructure: Infrastructure, replicas: int = 128
+        self,
+        ring_id: str,
+        arch: str,
+        memory: int,
+        cpus: float,
+        infrastructure: 'Infrastructure',
+        replicas: int = 128,
+        *,
+        node_bindings: 'NodeBindings | None' = None,
     ) -> None:
         # Identificatore univoco dell'anello
         self._id = nonempty_string(ring_id, 'ring_id')
@@ -33,8 +42,9 @@ class ArchitectureRing:
         self._memory = positive_integer(memory, 'memory')
         self._cpus = positive_number(cpus, 'cpus')
 
-        # Riferimento all'infrastruttura che possiede l'anello
+        # Riferimento all'infrastruttura che possiede l'anello e binding dei nodi
         self._infrastructure = infrastructure
+        self._node_bindings = node_bindings
         # Lista dei nodi fisici registrati nell'anello
         self._nodes: list[Node] = []
         self._replicas = positive_integer(replicas, 'replicas')
@@ -96,10 +106,14 @@ class ArchitectureRing:
             idle_timeout=idle_timeout, queue_capacity=queue_capacity, ring=self,
         )
 
-        # Registra le repliche virtuali e il nodo prima di notificare la creazione.
+        # Registra le repliche virtuali e il nodo prima di applicare i binding e notificare.
         self._register_replicas(node)
         self._positions.sort()
         self._nodes.append(node)
+
+        # Applica i binding di ciclo di vita al livello effettivo di creazione del nodo.
+        if self._node_bindings is not None:
+            self._node_bindings.bind(node)
 
         if self.on_node_created is not None:
             self.on_node_created(self, node)

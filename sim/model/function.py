@@ -1,6 +1,7 @@
 """Definizione delle funzioni e dei profili di simulazione."""
 
 from dataclasses import dataclass, field
+import json
 
 from sim.random.distributions import (
     ArrivalProcess, DeterministicArrivalProcess, DeterministicServiceTime,
@@ -64,6 +65,35 @@ class FunctionProfile:
             service = GammaServiceTime(mean, scv, streams, stream_id=name)
         return FunctionSampler(arrivals, service)
 
+    #####################
+    ### Serialization ###
+    #####################
+
+    def __str__(self) -> str:
+        """Restituisce una descrizione leggibile del profilo di simulazione."""
+        return (
+            f'FunctionProfile(arrival_rate={self.arrival_rate}, '
+            f'service_rate={self.service_rate}, '
+            f'arrival_distribution={self.arrival_distribution}, '
+            f'service_distribution={self.service_distribution})'
+        )
+
+    def to_dict(self) -> dict:
+        """Restituisce il profilo di simulazione in formato serializzabile."""
+        return {
+            'arrival_rate': self.arrival_rate,
+            'service_rate': self.service_rate,
+            'first_arrival_time': self.first_arrival_time,
+            'arrival_distribution': self.arrival_distribution,
+            'service_distribution': self.service_distribution,
+            'service_scv': self.service_scv,
+            'code_load_time': self.code_load_time,
+        }
+
+    def to_json(self) -> str:
+        """Serializza il profilo per la stampa o l'esportazione."""
+        return json.dumps(self.to_dict(), ensure_ascii=False, allow_nan=False)
+
 
 @dataclass(frozen=True)
 class Function:
@@ -106,5 +136,28 @@ class Function:
     def supports_machine_tag(self, machine_tag: str) -> bool:
         return matches_machine_tag(machine_tag, self.tag_pattern)
 
+    #####################
+    ### Serialization ###
+    #####################
+
     def __str__(self) -> str:
         return self.name
+
+    def to_dict(self) -> dict:
+        """Restituisce la configurazione della funzione in formato serializzabile."""
+        return {
+            'name': self.name,
+            'memory_mb': self.memory_mb,
+            'cpu_demand': self.cpu_demand,
+            'runtime': self.runtime.to_dict(),
+            'max_concurrency': self.max_concurrency,
+            'supported_archs': list(self.supported_archs) if self.supported_archs is not None else None,
+            'tag_pattern': self.tag_pattern,
+            'tar_function_code': self.tar_function_code,
+            'cold_start_time_s': self.cold_start_time,
+            'profile': self.profile.to_dict() if self.profile is not None else None,
+        }
+
+    def to_json(self) -> str:
+        """Serializza la funzione per la stampa o l'esportazione."""
+        return json.dumps(self.to_dict(), ensure_ascii=False, allow_nan=False)

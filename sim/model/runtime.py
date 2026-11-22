@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
+import json
 from typing import ClassVar
 
 from sim.utils.validation import finite_time, nonempty_string
@@ -66,6 +67,24 @@ class Runtime(ABC):
     def effective_concurrency(self, requested: int) -> int:
         """Restituisce il limite applicabile ai container della funzione."""
 
+    #####################
+    ### Serialization ###
+    #####################
+
+    def __str__(self) -> str:
+        """Restituisce una descrizione leggibile del runtime."""
+        fields = self.to_dict()
+        details = ', '.join(f'{name}={value}' for name, value in fields.items() if value is not None)
+        return f'{type(self).__name__}({details})'
+
+    @abstractmethod
+    def to_dict(self) -> dict:
+        """Restituisce la configurazione del runtime in formato serializzabile."""
+
+    def to_json(self) -> str:
+        """Serializza il runtime per la stampa o l'esportazione."""
+        return json.dumps(self.to_dict(), ensure_ascii=False, allow_nan=False)
+
 
 @dataclass(frozen=True)
 class BuiltinRuntime(Runtime):
@@ -83,6 +102,15 @@ class BuiltinRuntime(Runtime):
     def effective_concurrency(self, requested: int) -> int:
         return 1 if self.name == 'nodejs17ng' else max(1, requested)
 
+    def to_dict(self) -> dict:
+        """Restituisce la configurazione del runtime integrato in formato serializzabile."""
+        return {
+            'type': type(self).__name__,
+            'name': self.name,
+            'image': self.image,
+            'startup_time_s': self.startup_time,
+        }
+
 
 @dataclass(frozen=True)
 class CustomRuntime(Runtime):
@@ -95,3 +123,11 @@ class CustomRuntime(Runtime):
 
     def effective_concurrency(self, requested: int) -> int:
         return 1
+
+    def to_dict(self) -> dict:
+        """Restituisce la configurazione del runtime custom in formato serializzabile."""
+        return {
+            'type': type(self).__name__,
+            'image': self.image,
+            'startup_time_s': self.startup_time,
+        }
