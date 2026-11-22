@@ -75,12 +75,13 @@ class RegionsTest(unittest.TestCase):
             NotificationType.REQUEST_FORWARDED, NotificationType.REQUEST_DELIVERED,
             NotificationType.REQUEST_ACCEPTED, NotificationType.REQUEST_COMPLETED,
         ])
-        self.assertEqual(registered.region, 'edge')
-        self.assertEqual((forwarded.source_region, forwarded.region, delivered.sim_time_s), ('edge', 'cloud', 0.125))
-        self.assertEqual({event.request_id for event in (forwarded, delivered, admitted, completed)}, {arrived.request_id})
-        self.assertEqual((arrived.region, completed.region), ('edge', 'cloud'))
-        self.assertIsNone(completed.node_id)
-        self.assertIsNone(completed.container_id)
+        edge, cloud = simulation.regions['edge'], simulation.regions['cloud']
+        self.assertIs(registered.region, edge)
+        self.assertEqual((forwarded.source_region, forwarded.region, delivered.sim_time_s), (edge, cloud, 0.125))
+        self.assertEqual({event.request for event in (forwarded, delivered, admitted, completed)}, {arrived.request})
+        self.assertEqual((arrived.region, completed.region), (edge, cloud))
+        self.assertIsNone(completed.node)
+        self.assertIsNone(completed.container)
 
     def test_offload_to_simulated_region_releases_remote_resources_before_return(self):
         scenario = Scenario([FUNCTION], primary_region='edge', invocation={'can_offload': True}, regions={

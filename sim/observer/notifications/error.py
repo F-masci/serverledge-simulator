@@ -8,7 +8,7 @@ from .notification import Notification, NotificationType
 
 @dataclass(frozen=True)
 class SimulationError(Notification):
-    """Descrive un errore del calendario con dati serializzabili."""
+    """Descrive un errore del calendario o del caricamento con dati serializzabili."""
 
     type = NotificationType.SIMULATION_ERROR
     level = ERROR
@@ -18,13 +18,21 @@ class SimulationError(Notification):
     run_id: str | None = None
     sim_time_s: float | None = None
 
+    ### Error details ###
+
     @property
     def error_type(self) -> str:
+        """Restituisce il nome della classe dell'eccezione catturata."""
         return type(self.exception).__name__
 
     @property
     def message(self) -> str:
+        """Restituisce il messaggio testuale dell'eccezione."""
         return str(self.exception)
+
+    #####################
+    ### Serialization ###
+    #####################
 
     def __str__(self) -> str:
         time = f'[{self.sim_time_s:.6g} s] ' if self.sim_time_s is not None else ''

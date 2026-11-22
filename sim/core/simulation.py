@@ -292,7 +292,7 @@ class Simulation:
         Callback invocata dal nodo al termine di _forward_region.
         """
         delay = request.return_delay
-        self._ctx.observer.notify_request_forwarded(request, node.region.name)
+        self._ctx.observer.notify_request_forwarded(request, node.region)
 
         # Con latenza nulla la consegna avviene immediatamente nello stesso istante simulato.
         if delay == 0:

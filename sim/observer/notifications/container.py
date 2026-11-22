@@ -1,29 +1,49 @@
 """Notifiche del ciclo di vita dei container."""
 
-from dataclasses import asdict, dataclass, field
+from abc import ABC
+from dataclasses import dataclass, field
 from logging import DEBUG, INFO
+from typing import TYPE_CHECKING
 
-from sim.model.container import ContainerState
+from sim.model.container import ContainerState, DockerContainer
+from sim.model.function import Function
+from sim.model.node import Node
 from .node import ResourceSnapshot
 from .notification import Notification, NotificationType
 
+if TYPE_CHECKING:
+    from sim.model.region import Region
+    from sim.model.ring import ArchitectureRing
+
 
 @dataclass(frozen=True)
-class _ContainerNotification(Notification):
+class _ContainerNotification(Notification, ABC):
+    """Base comune per le notifiche legate al ciclo di vita di un container."""
+
     run_id: str
     sim_time_s: float
-    ring_id: str
-    node_id: str
-    container_id: str
-    function: str
-    region: str | None = field(default=None, kw_only=True)
+    ring: 'ArchitectureRing'
+    node: Node
+    container: DockerContainer
+    region: 'Region | None' = field(default=None, kw_only=True)
+
+    ### Domain references ###
+
+    @property
+    def function(self) -> Function:
+        """Restituisce la funzione associata al container."""
+        return self.container.function
+
+    #####################
+    ### Serialization ###
+    #####################
 
     def __str__(self) -> str:
-        region = f' regione={self.region}' if self.region is not None else ''
+        region = f' regione={self.region.name}' if self.region is not None else ''
         return (
             f'[{self.sim_time_s:.6g} s] {self.type.value} '
-            f'container={self.container_id} funzione={self.function} '
-            f'nodo={self.node_id} ring={self.ring_id}{region}'
+            f'container={self.container.id} funzione={self.function.name} '
+            f'nodo={self.node.id.key} ring={self.ring.id}{region}'
         )
 
     def to_dict(self) -> dict:
@@ -32,18 +52,18 @@ class _ContainerNotification(Notification):
             'run_id': self.run_id,
             'sim_time_s': self.sim_time_s,
             'data': {
-                'ring_id': self.ring_id,
-                'region': self.region,
-                'node_id': self.node_id,
-                'container_id': self.container_id,
-                'function': self.function,
+                'ring_id': self.ring.id,
+                'region': self.region.name if self.region is not None else None,
+                'node_id': self.node.id.key,
+                'container_id': self.container.id,
+                'function': self.function.name,
             },
         }
 
 
 @dataclass(frozen=True)
 class ContainerStateChanged(_ContainerNotification):
-    """Una transizione del container con le prenotazioni aggiornate del nodo."""
+    """Segnala una transizione di stato del container con le prenotazioni aggiornate del nodo."""
 
     type = NotificationType.CONTAINER_STATE_CHANGED
     level = DEBUG
@@ -51,6 +71,10 @@ class ContainerStateChanged(_ContainerNotification):
     previous: ContainerState | None = field(default=None, kw_only=True)
     state: ContainerState | None = field(default=None, kw_only=True)
     resources: ResourceSnapshot | None = field(default=None, kw_only=True)
+
+    #####################
+    ### Serialization ###
+    #####################
 
     def __str__(self) -> str:
         text = super().__str__()
@@ -65,14 +89,14 @@ class ContainerStateChanged(_ContainerNotification):
             payload['data'].update(
                 previous=self.previous.value if self.previous is not None else None,
                 state=self.state.value,
-                resources=asdict(self.resources) if self.resources is not None else None,
+                resources=self.resources.to_dict() if self.resources is not None else None,
             )
         return payload
 
 
 @dataclass(frozen=True)
 class ContainerStarted(ContainerStateChanged):
-    """Un nuovo container è pronto per l'esecuzione o il pool idle."""
+    """Un nuovo container è pronto per l'esecuzione o per il pool idle."""
 
     type = NotificationType.CONTAINER_STARTED
     level = INFO

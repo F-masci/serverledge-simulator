@@ -1,4 +1,4 @@
-"""Notifiche che trasportano le metriche di una replica."""
+"""Notifiche che trasportano le metriche aggregate di una replica."""
 
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -10,7 +10,7 @@ from .notification import Notification, NotificationType
 
 @dataclass(frozen=True)
 class FinalStatistics(Notification):
-    """Fotografia delle metriche al termine dell'esecuzione."""
+    """Fotografia delle metriche al termine dell'esecuzione della simulazione."""
 
     type = NotificationType.FINAL_STATISTICS
     level = INFO
@@ -20,6 +20,10 @@ class FinalStatistics(Notification):
     outcome: Literal['completed', 'interrupted', 'failed']
     metrics: dict = field(repr=False)
     summary: str = field(repr=False)
+
+    #####################
+    ### Serialization ###
+    #####################
 
     def __str__(self) -> str:
         return f'[{self.sim_time_s:.6g} s] {self.type.value} run={self.run_id} esito={self.outcome}\n{self.summary}'

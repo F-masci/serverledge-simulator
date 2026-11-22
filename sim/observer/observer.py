@@ -1,8 +1,8 @@
 """Distribuzione sincrona delle notifiche della replica e del processo."""
 
-import logging
 from collections.abc import Callable
 from itertools import chain
+import logging
 from typing import TYPE_CHECKING
 
 from .notifications import (
@@ -21,13 +21,24 @@ if TYPE_CHECKING:
 
 
 class Observer:
+    """
+    Dispatcher sincrono delle notifiche di una replica o del processo.
+
+    Costruisce le notifiche mantenendo riferimenti diretti agli oggetti Python
+    del modello (regioni, anelli, nodi, container, richieste) e le propaga
+    prima ai subscriber locali della replica e poi all'observer padre condiviso.
+    """
+
     def __init__(
         self, ctx: 'SimulationContext | None' = None, *, parent: 'Observer | None' = None,
     ) -> None:
         self._ctx = ctx
         self._parent = parent
-        self._node_rings: dict[Node, str] = {}
         self._subscribers: dict[object, tuple[Callable[[Notification], None], bool]] = {}
+
+    #####################
+    ### Subscriptions ###
+    #####################
 
     def subscribe(
         self, handler: Callable[[Notification], None], *, propagate_errors: bool = False,
@@ -41,11 +52,16 @@ class Observer:
 
         return unsubscribe
 
+    ################
+    ### Dispatch ###
+    ################
+
     def notify(self, notification: Notification) -> None:
         """Notifica i subscriber della replica, poi quelli del processo."""
         if not isinstance(notification, Notification):
             raise TypeError('La notifica deve implementare Notification')
-        # Una callback può iscriversi o scollegarsi durante la notifica.
+
+        # Itera su una copia perché una callback può iscriversi o scollegarsi durante la notifica.
         for handler, propagate_errors in tuple(self._subscribers.values()):
             try:
                 handler(notification)
@@ -53,52 +69,51 @@ class Observer:
                 if propagate_errors:
                     raise
                 logging.getLogger(__name__).exception('Errore nel subscriber di %s', notification.type)
+
         if self._parent is not None:
             self._parent.notify(notification)
 
     def _ensure_context(self) -> 'SimulationContext':
+        """Restituisce il contesto associato all'observer o solleva RuntimeError."""
         if self._ctx is None:
             raise RuntimeError('Observer non associato a un contesto di simulazione')
         return self._ctx
 
+    #############################
+    ### Request notifications ###
+    #############################
+
     def _request_fields(self, request: Request) -> dict:
+        """Raccoglie i campi comuni di contesto e riferimenti di dominio della richiesta."""
         ctx = self._ensure_context()
         node = request.node
-        region = request.region
-        if node is not None and region is not None and node not in self._node_rings:
-            if region.infrastructure is not None:
-                for ring_id, ring in region.infrastructure.rings.items():
-                    if node in ring:
-                        self.notify_node_registered(node, region.name, ring_id)
-                        break
         return {
             'run_id': ctx.simulation.run_id,
             'sim_time_s': ctx.engine.now,
-            'request_id': request.id,
-            'function': request.function.name,
-            'region': region.name if region is not None else None,
-            'ring_id': self._node_rings.get(node),
+            'request': request,
+            'region': request.region,
+            'ring': node.ring if node is not None else None,
         }
 
     def notify_arrival(self, request: Request, *, region: 'Region | None' = None) -> None:
         """Notifica l'arrivo di una richiesta nella regione di ingresso."""
         fields = self._request_fields(request)
-        fields['region'] = region.name if region is not None else None
+        fields['region'] = region
         self.notify(RequestArrived(**fields))
 
     def notify_request_queued(self, request: Request) -> None:
         """Notifica l'accodamento sul nodo assegnato."""
         node = request.node
         assert node is not None
-        self.notify(RequestQueued(**self._request_fields(request), node_id=node.id.key))
+        self.notify(RequestQueued(**self._request_fields(request), node=node))
 
     def notify_request_dequeued(self, request: Request) -> None:
         """Notifica l'estrazione dalla FIFO del nodo."""
         node = request.node
         assert node is not None
-        self.notify(RequestDequeued(**self._request_fields(request), node_id=node.id.key))
+        self.notify(RequestDequeued(**self._request_fields(request), node=node))
 
-    def notify_request_forwarded(self, request: Request, source: str) -> None:
+    def notify_request_forwarded(self, request: Request, source: 'Region') -> None:
         """Notifica la partenza verso un'altra regione."""
         self.notify(RequestForwarded(**self._request_fields(request), source_region=source))
 
@@ -108,60 +123,73 @@ class Observer:
 
     def notify_request_accepted(self, request: Request, *, queue_wait_s: float | None = None) -> None:
         """Notifica l'ammissione e l'eventuale attesa nella FIFO."""
-        node = request.node
         self.notify(RequestAccepted(
             **self._request_fields(request),
-            node_id=node.id.key if node is not None else None,
+            node=request.node,
             warm=request.warm,
             queue_wait_s=queue_wait_s,
         ))
 
     def notify_request_rejected(self, request: Request) -> None:
-        """Notifica il rifiuto di una richiesta."""
-        node = request.node
+        """Notifica il rifiuto definitivo di una richiesta."""
         self.notify(RequestRejected(
             **self._request_fields(request),
             reason=request.rejection_reason or 'unknown',
-            node_id=node.id.key if node is not None else None,
+            node=request.node,
         ))
 
     def notify_request_completed(self, request: Request) -> None:
-        """Notifica il completamento di una richiesta."""
+        """Notifica il completamento di una richiesta e la consegna della risposta."""
         ctx = self._ensure_context()
-        node, container = request.node, request.container
         self.notify(RequestCompleted(
             **self._request_fields(request),
-            node_id=node.id.key if node is not None else None,
-            container_id=container.id if container is not None else None,
+            node=request.node,
+            container=request.container,
             response_time_s=ctx.engine.now - request.arrival_time,
             service_time_s=request.service_duration,
         ))
 
-    def notify_node_registered(self, node: Node, region: str, ring_id: str) -> None:
-        """Pubblica lo stato iniziale del nodo."""
+    ########################################
+    ### Node and container notifications ###
+    ########################################
+
+    def notify_node_registered(self, node: Node) -> None:
+        """Pubblica lo stato iniziale del nodo al momento della registrazione."""
         ctx = self._ensure_context()
-        self._node_rings[node] = ring_id
         containers = chain.from_iterable(node.containers.values())
         self.notify(NodeRegistered(
-            ctx.simulation.run_id, ctx.engine.now, region, ring_id, node.id.key,
+            ctx.simulation.run_id,
+            ctx.engine.now,
+            node.region,
+            node.ring,
+            node,
             ResourceSnapshot.from_node(node),
-            tuple(ContainerSnapshot(c.id, c.function.name, c.state) for c in containers),
+            tuple(ContainerSnapshot(container, container.state) for container in containers),
         ))
 
     def notify_container_state(
-        self, region: str, ring_id: str, node: Node, container: DockerContainer, previous: ContainerState | None, current: ContainerState
+        self, node: Node, container: DockerContainer, previous: ContainerState | None, current: ContainerState,
     ) -> None:
-        """Pubblica la transizione e le prenotazioni risultanti."""
+        """Pubblica la transizione di stato del container e le prenotazioni risultanti del nodo."""
         ctx = self._ensure_context()
         notification = ContainerStateChanged
-        if previous is ContainerState.CREATING and container.state in (ContainerState.BUSY, ContainerState.IDLE):
+        if previous is ContainerState.CREATING and current in (ContainerState.BUSY, ContainerState.IDLE):
             notification = ContainerStarted
-        elif previous is ContainerState.IDLE and container.state is ContainerState.DESTROYED:
+        elif previous is ContainerState.IDLE and current is ContainerState.DESTROYED:
             notification = ContainerStopped
+
         self.notify(notification(
-            ctx.simulation.run_id, ctx.engine.now, ring_id, node.id.key, container.id, container.function.name,
-            region=region, previous=previous, state=container.state, resources=ResourceSnapshot.from_node(node),
+            ctx.simulation.run_id,
+            ctx.engine.now,
+            node.ring,
+            node,
+            container,
+            region=node.region,
+            previous=previous,
+            state=current,
+            resources=ResourceSnapshot.from_node(node),
         ))
 
 
+# Observer condiviso a livello di processo per i subscriber esterni (es. logger CLI).
 observer = Observer()

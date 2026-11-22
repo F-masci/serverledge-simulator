@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from functools import partial
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -27,16 +26,14 @@ class NodeBindings:
 
     ### Lifecycle Callbacks ###
 
-    on_node_registered: Callable[[Node, str, str], None] | None = None
+    on_node_registered: Callable[[Node], None] | None = None
 
     ### Container Callbacks ###
 
     on_container_created: Callable[[Node, DockerContainer], None] | None = None
     on_container_acquired: Callable[[Node, DockerContainer], None] | None = None
     on_container_destroyed: Callable[[Node, DockerContainer], None] | None = None
-    on_container_state_changed: (
-        Callable[[str, str, Node, DockerContainer, ContainerState | None, ContainerState], None] | None
-    ) = None
+    on_container_state_changed: Callable[[Node, DockerContainer, ContainerState | None, ContainerState], None] | None = None
     on_container_idle: Callable[[Node, DockerContainer], None] | None = None
     on_container_busy: Callable[[Node, DockerContainer], None] | None = None
 
@@ -52,9 +49,6 @@ class NodeBindings:
 
     def bind(self, node: Node) -> None:
         """Associa al nodo tutte le callback configurate e notifica la registrazione."""
-        region_name = node.region.name
-        ring_id = node.ring.id
-
         # Collega le callback di ciclo di vita dei container sul nodo.
         if self.on_container_created is not None:
             node.on_container_created = self.on_container_created
@@ -63,9 +57,7 @@ class NodeBindings:
         if self.on_container_destroyed is not None:
             node.on_container_destroyed = self.on_container_destroyed
         if self.on_container_state_changed is not None:
-            node.on_container_state_changed = partial(
-                self.on_container_state_changed, region_name, ring_id
-            )
+            node.on_container_state_changed = self.on_container_state_changed
         if self.on_container_idle is not None:
             node.on_container_idle = self.on_container_idle
         if self.on_container_busy is not None:
@@ -81,4 +73,4 @@ class NodeBindings:
 
         # Notifica la registrazione del nodo dopo aver collegato le sue callback.
         if self.on_node_registered is not None:
-            self.on_node_registered(node, region_name, ring_id)
+            self.on_node_registered(node)

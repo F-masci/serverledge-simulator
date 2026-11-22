@@ -196,13 +196,14 @@ class SimulationMetrics:
             case ContainerStateChanged():
                 self._record_container_state(notification)
             case RequestArrived(region=region) if region is not None:
-                self._external_arrivals[region] += 1
+                self._external_arrivals[region.name] += 1
             case RequestForwarded(source_region=source, region=destination) if destination is not None:
-                self._offloads[source, destination] += 1
-                for stats in self._invocations_for(notification.function, destination):
+                self._offloads[source.name, destination.name] += 1
+                for stats in self._invocations_for(notification.function.name, destination.name):
                     stats.in_transit += 1
             case RequestDelivered():
-                for stats in self._invocations_for(notification.function, notification.region):
+                region_name = notification.region.name if notification.region is not None else None
+                for stats in self._invocations_for(notification.function.name, region_name):
                     stats.in_transit -= 1
             case RequestQueued() | RequestAccepted() | RequestRejected() | RequestCompleted():
                 self._record_invocation(notification)
@@ -210,7 +211,10 @@ class SimulationMetrics:
     def _record_invocation(
         self, event: RequestQueued | RequestAccepted | RequestRejected | RequestCompleted,
     ) -> None:
-        for stats in self._invocations_for(event.function, event.region, event.ring_id, event.node_id):
+        region_name = event.region.name if event.region is not None else None
+        ring_id = event.ring.id if event.ring is not None else None
+        node_id = event.node.id.key if event.node is not None else None
+        for stats in self._invocations_for(event.function.name, region_name, ring_id, node_id):
             match event:
                 case RequestQueued():
                     stats.waiting += 1
@@ -225,13 +229,13 @@ class SimulationMetrics:
                     stats.record_completion(event.response_time_s, event.service_time_s)
 
     def _register_node(self, event: NodeRegistered) -> None:
-        key = (event.region, event.ring_id, event.node_id)
+        key = (event.region.name, event.ring.id, event.node.id.key)
         if key in self._by_node:
             return
         self._by_node[key] = _NodeMetrics(event.resources, event.sim_time_s)
-        for container in event.containers:
-            for stats in self._container_scopes(key, container.function):
-                stats.observe(event.sim_time_s, container.state, 1)
+        for snapshot in event.containers:
+            for stats in self._container_scopes(key, snapshot.container.function.name):
+                stats.observe(event.sim_time_s, snapshot.state, 1)
 
     def _container_scopes(self, key: _NodeKey, name: str) -> Iterator[_ContainerMetrics]:
         self._container_functions.add(name)
@@ -244,8 +248,8 @@ class SimulationMetrics:
     def _record_container_state(self, event: ContainerStateChanged) -> None:
         if event.region is None or event.state is None or event.resources is None:
             raise ValueError('La transizione richiede regione, stato e prenotazioni del nodo')
-        key = (event.region, event.ring_id, event.node_id)
-        container = (key, event.container_id)
+        key = (event.region.name, event.ring.id, event.node.id.key)
+        container = (key, event.container.id)
         now = event.sim_time_s
         creation_time = None
         if event.previous is None:
@@ -254,7 +258,7 @@ class SimulationMetrics:
             started_at = self._creation_started_at.pop(container, None)
             if started_at is not None:
                 creation_time = now - started_at
-        for stats in self._container_scopes(key, event.function):
+        for stats in self._container_scopes(key, event.function.name):
             stats.record_transition(now, event.previous, event.state, creation_time)
         self._by_node[key].observe(event.resources, now)
 

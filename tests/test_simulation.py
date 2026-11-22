@@ -419,16 +419,21 @@ class SimulationTest(unittest.TestCase):
         totals = simulation.run(arrivals=3).metrics['total']
         self.assertEqual((totals['arrivals'], totals['queued'], totals['waiting'], totals['pending']), (3, 1, 1, 2))
         queued, = [event for event in notifications if event.type is NotificationType.REQUEST_QUEUED]
-        self.assertEqual((queued.sim_time_s, queued.region, queued.ring_id, queued.node_id), (1, 'default', 'edge', 'n1'))
+        self.assertEqual(
+            (queued.sim_time_s, queued.region.name, queued.ring.id, queued.node.id.key),
+            (1, 'default', 'edge', 'n1'),
+        )
 
         self.advance_to(simulation._ctx.engine, 2.5)
         snapshot = simulation.metrics_snapshot()
         admitted, = [event for event in notifications if event.type is NotificationType.REQUEST_ACCEPTED
-                     and event.request_id == queued.request_id]
+                     and event.request is queued.request]
         dequeued, = [event for event in notifications if event.type is NotificationType.REQUEST_DEQUEUED]
-        self.assertEqual(dequeued.request_id, queued.request_id)
-        self.assertEqual((dequeued.sim_time_s, dequeued.region, dequeued.ring_id, dequeued.node_id),
-                         (2.5, 'default', 'edge', 'n1'))
+        self.assertIs(dequeued.request, queued.request)
+        self.assertEqual(
+            (dequeued.sim_time_s, dequeued.region.name, dequeued.ring.id, dequeued.node.id.key),
+            (2.5, 'default', 'edge', 'n1'),
+        )
         self.assertLess(notifications.index(dequeued), notifications.index(admitted))
         self.assertEqual((admitted.queue_wait_s, admitted.warm), (1.5, True))
         totals = snapshot['total']

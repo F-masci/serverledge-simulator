@@ -75,9 +75,9 @@ class InfrastructureTest(unittest.TestCase):
         registered, state_events = [], []
         region = Region('edge')
         bindings = NodeBindings(
-            on_node_registered=lambda node, region_name, ring_id: registered.append((node.id.key, region_name, ring_id)),
-            on_container_state_changed=lambda region_name, ring_id, node, container, prev, curr: state_events.append(
-                (region_name, ring_id, node.id.key, prev, curr)
+            on_node_registered=lambda node: registered.append((node.id.key, node.region.name, node.ring.id)),
+            on_container_state_changed=lambda node, container, prev, curr: state_events.append(
+                (node.region.name, node.ring.id, node.id.key, prev, curr)
             ),
         )
         infra = Infrastructure(region=region, node_bindings=bindings)
