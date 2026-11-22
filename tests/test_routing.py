@@ -31,7 +31,7 @@ class RoutingTest(unittest.TestCase):
             ('first', 'amd64', 'x86-large/gpu/nvidia'),
             ('second', 'amd64', 'x86-tiny/gpu/nvidia'),
         ):
-            infra.create_ring(ring_id, arch=arch, memory=512, cpus=2)
+            infra.create_ring(ring_id, arch=arch, memory=512, cpus=2, machine_tag=tag or ring_id)
             if tag is not None:
                 infra.create_node(ring_id, ring_id, tag)
         constrained = replace(function(archs=('amd64',)), tag_pattern='GPU, nvidia')
@@ -63,9 +63,9 @@ class RoutingTest(unittest.TestCase):
         infra = Infrastructure(RandomLoadBalancer(seed=seed))
         nodes = {}
         for ring_id in ('gpu-first', 'gpu-second', 'gpu-third', 'plain'):
-            infra.create_ring(ring_id, arch='amd64', memory=128, cpus=1)
+            infra.create_ring(ring_id, arch='amd64', memory=128, cpus=1, machine_tag=f'x86/{ring_id}')
             nodes[ring_id] = infra.create_node(
-                ring_id, ring_id, f'x86/{ring_id}', queue_capacity=1,
+                ring_id, ring_id, f'x86/{ring_id}', queue_capacity=0,
             )
 
         fun = replace(function(), tag_pattern='x86/gpu-*')
@@ -90,12 +90,15 @@ class RoutingTest(unittest.TestCase):
         self.assertIsNone(payload['container_id'])
         self.assertEqual(nodes['plain'].resources.used_cpus, 0)
 
-    def test_ring_with_mixed_node_tags_only_admits_compatible_nodes(self):
+    def test_ring_enforces_homogeneous_machine_tag_and_routes_by_ring_tag(self):
         infra = Infrastructure()
-        ring = infra.create_ring('r', arch='amd64', memory=512, cpus=2)
-        regular = infra.create_node('r', 'one')
-        gpu = infra.create_node('r', 'three', 'x86/gpu')
-        self.assertIs(ring.select_node(function()), regular)
+        infra.create_ring('regular', arch='amd64', memory=512, cpus=2)
+        regular = infra.create_node('regular', 'one')
+        with self.assertRaisesRegex(ValueError, 'machine_tag'):
+            infra.create_node('regular', 'three', 'x86/gpu')
+
+        infra.create_ring('gpu', arch='amd64', memory=512, cpus=2, machine_tag='x86/gpu')
+        gpu = infra.create_node('gpu', 'three', 'x86/gpu')
 
         constrained = replace(function(), tag_pattern='gpu')
         self.assertIs(infra.submit(Request(constrained)), gpu)
@@ -103,6 +106,22 @@ class RoutingTest(unittest.TestCase):
         self.assertIsNone(infra.submit(rejected))
         self.assertEqual(rejected.rejection_reason, 'no_destination')
         self.assertEqual(regular.resources.used_cpus, 0)
+
+    def test_balancer_reuses_busy_multi_concurrency_container_at_full_cpu(self):
+        infra = Infrastructure()
+        infra.create_ring('r', arch='amd64', memory=128, cpus=1)
+        node = infra.create_node('r', 'n1')
+        fun = Function('mc', 128, 1, BuiltinRuntime('python314'), max_concurrency=2)
+
+        first = Request(fun)
+        self.assertIs(infra.submit(first), node)
+        node.creation_succeeded(first.container, 0)
+        self.assertEqual(node.resources.available_cpus, 0)
+
+        second = Request(fun)
+        self.assertIs(infra.submit(second), node)
+        self.assertTrue(second.warm)
+        self.assertIs(second.container, first.container)
 
     def test_round_robin_balancer_cycles_compatible_rings_in_registration_order(self):
         infra = Infrastructure()
@@ -113,7 +132,7 @@ class RoutingTest(unittest.TestCase):
             ('second', 'amd64', 'x86-tiny/gpu/nvidia'),
             ('third', 'amd64', 'x86-mid/gpu/nvidia'),
         ):
-            infra.create_ring(ring_id, arch=arch, memory=512, cpus=2)
+            infra.create_ring(ring_id, arch=arch, memory=512, cpus=2, machine_tag=tag or ring_id)
             if tag is not None:
                 infra.create_node(ring_id, ring_id, tag)
 
@@ -134,12 +153,44 @@ class RoutingTest(unittest.TestCase):
         self.assertEqual(balancer.submit(Request(all_gpu), infra.rings.values()).id, 'first')
 
     def test_unavailable_balancers_fail_on_instantiation(self):
-        for balancer, mode in (
-            (MABLoadBalancer, 'MAB'),
-            (ArchitectureUnawareLoadBalancer, 'ArchitectureUnaware'),
-        ):
-            with self.subTest(mode=mode), self.assertRaisesRegex(NotImplementedError, mode):
-                balancer()
+        with self.assertRaisesRegex(NotImplementedError, 'MAB'):
+            MABLoadBalancer()
+
+    def test_architecture_unaware_balancer_uses_single_global_ring_ignoring_machine_tags(self):
+        balancer = ArchitectureUnawareLoadBalancer()
+        infra = Infrastructure(balancer)
+        infra.create_ring('x86', arch='amd64', memory=128, cpus=1, machine_tag='x86/plain')
+        infra.create_ring('arm', arch='arm64', memory=128, cpus=1, machine_tag='arm/gpu')
+        x86_node = infra.create_node('x86', 'one', 'x86/plain')
+        arm_node = infra.create_node('arm', 'three', 'arm/gpu')
+
+        # Ignora tag_pattern, ma rispetta comunque supported_archs come HashRing.Get in Go.
+        both = replace(function(archs=('amd64', 'arm64')), tag_pattern='gpu')
+        first_expected = balancer.select_node(both, infra.rings.values())
+        self.assertIs(first_expected, x86_node)
+
+        first = Request(both)
+        self.assertIs(infra.submit(first), x86_node)
+        second = Request(both)
+        self.assertIs(infra.submit(second), arm_node)
+        third = Request(both)
+        self.assertIsNone(infra.submit(third))
+        self.assertEqual(third.rejection_reason, 'out_of_resources')
+
+        # Se la funzione supporta una sola architettura, salta i nodi incompatibili.
+        infra_single = Infrastructure(ArchitectureUnawareLoadBalancer())
+        infra_single.create_ring('x86', arch='amd64', memory=128, cpus=1)
+        infra_single.create_ring('arm', arch='arm64', memory=128, cpus=1)
+        infra_single.create_node('x86', 'one')
+        arm_only_node = infra_single.create_node('arm', 'three')
+        arm_only = replace(function(archs=('arm64',)), tag_pattern='nonexistent-tag')
+        self.assertIs(infra_single.submit(Request(arm_only)), arm_only_node)
+
+        # La rimozione di un nodo aggiorna il ring globale.
+        infra_single.remove_node('arm', 'three')
+        rejected = Request(arm_only)
+        self.assertIsNone(infra_single.submit(rejected))
+        self.assertEqual(rejected.rejection_reason, 'no_destination')
 
     def test_empty_and_incompatible_rings_are_skipped(self):
         """Non si inoltra a ring vuoti o non compatibili; senza destinazione restituisce None."""

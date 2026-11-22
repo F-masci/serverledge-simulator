@@ -32,7 +32,7 @@ def _number(value: float | None, suffix: str = '') -> str:
 def _section(title: str, rows: Iterable[tuple[str, object]]) -> str:
     """Formatta una sezione chiave-valore allineata per etichetta."""
     fields = tuple(rows)
-    width = max(len(label) for label, _ in fields)
+    width = max((len(label) for label, _ in fields), default=0)
     return '\n'.join([title, *(f'  {label:<{width}}  {value}' for label, value in fields)])
 
 

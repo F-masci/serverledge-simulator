@@ -30,17 +30,18 @@ class Runtime(ABC):
     ) -> 'Runtime':
         """Restituisce l'istanza condivisa per runtime, immagine e tempo di avvio."""
 
-        # Cerca il nome tra i runtime integrati e risolve l'immagine Docker.
+        # Cerca il nome tra i runtime integrati o accetta solo il runtime custom esplicito.
         builtin = name in _BUILTIN_IMAGES
         if builtin:
             if custom_image is not None:
                 raise ValueError('custom_image è ammesso solo per il runtime custom')
             image = _BUILTIN_IMAGES[name]
-        else:
-            # Un nome non integrato può indicare direttamente un'immagine custom.
-            if name == 'custom' and custom_image is None:
+        elif name == 'custom':
+            if custom_image is None:
                 raise ValueError('Immagine custom obbligatoria')
-            image = nonempty_string(custom_image if custom_image is not None else name, 'custom_image')
+            image = nonempty_string(custom_image, 'custom_image')
+        else:
+            raise ValueError(f'Runtime sconosciuto: {name}')
 
         # Usa il tempo configurato per l'immagine, se presente nello scenario.
         if startup_times is not None:
@@ -88,6 +89,8 @@ class Runtime(ABC):
 
 @dataclass(frozen=True)
 class BuiltinRuntime(Runtime):
+    """Runtime integrato con immagine ufficiale Serverledge."""
+
     name: str
 
     def __post_init__(self) -> None:
@@ -114,6 +117,8 @@ class BuiltinRuntime(Runtime):
 
 @dataclass(frozen=True)
 class CustomRuntime(Runtime):
+    """Runtime personalizzato con immagine Docker esplicita e concorrenza unitaria."""
+
     image: str
 
     def __post_init__(self) -> None:

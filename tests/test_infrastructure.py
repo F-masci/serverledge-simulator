@@ -27,7 +27,7 @@ class InfrastructureTest(unittest.TestCase):
 
         infra.on_ring_created = ring_created
         infra.on_node_created = node_created
-        ring = infra.create_ring('x86-small', arch='amd64', memory=512, cpus=2)
+        ring = infra.create_ring('x86-small', arch='amd64', memory=512, cpus=2, machine_tag='cpu')
         node = infra.create_node('x86-small', 'n1', 'cpu')
 
         self.assertIs(infra.create_ring('x86-small', cpus=4), ring)
@@ -37,10 +37,12 @@ class InfrastructureTest(unittest.TestCase):
         self.assertEqual((node.id.arch, node.id.machine_tag), ('amd64', 'cpu'))
 
     def test_ring_capacities_are_shared_but_reservations_are_independent(self):
-        """Stessa architettura può avere ring di taglie diverse; ogni ring resta omogeneo."""
+        """Stessa architettura può avere ring con machine_tag distinti; ogni ring resta omogeneo."""
         infra = Infrastructure()
-        small = infra.create_ring('small', arch='amd64', memory=512, cpus=2)
-        large = infra.create_ring('large', arch='amd64', memory=1024, cpus=4)
+        small = infra.create_ring('small', arch='amd64', memory=512, cpus=2, machine_tag='amd64-small')
+        large = infra.create_ring('large', arch='amd64', memory=1024, cpus=4, machine_tag='amd64-large')
+        with self.assertRaisesRegex(ValueError, 'machine_tag'):
+            infra.create_ring('dup', arch='amd64', memory=512, cpus=2, machine_tag='amd64-small')
         a = infra.create_node('small', 'a')
         b = infra.create_node('small', 'b')
         c = infra.create_node('large', 'c')

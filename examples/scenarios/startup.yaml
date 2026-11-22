@@ -95,28 +95,48 @@ regions:
         cpus: 2.0
         nodes:
         - name: edge-1
+      - id: edge-x86-standard
+        arch: amd64
+        machine_tag: amd64/standard
+        memory_mb: 512
+        cpus: 2.0
+        nodes:
         - name: edge-2
-          machine_tag: amd64/standard
-      - id: edge-arm-gateways
+      - id: edge-arm-gateway
         arch: arm64
+        machine_tag: gateway-arm
         memory_mb: 512
         cpus: 1.0
         nodes:
         - name: gateway
-          machine_tag: gateway-arm
           policy: edgecloud
           remote_region: regional
+      - id: edge-arm-archive
+        arch: arm64
+        machine_tag: archive-arm
+        memory_mb: 512
+        cpus: 1.0
+        nodes:
         - name: archive
-          machine_tag: archive-arm
           policy: cloudonly
           remote_region: cloud
+      - id: edge-arm-forwarder
+        arch: arm64
+        machine_tag: forward-arm
+        memory_mb: 512
+        cpus: 1.0
+        nodes:
         - name: forwarder
-          machine_tag: forward-arm
           policy: edgeonly
           nearest_neighbors:
           - edge-worker
+      - id: edge-arm-relay
+        arch: arm64
+        machine_tag: regional-arm
+        memory_mb: 512
+        cpus: 1.0
+        nodes:
         - name: relay
-          machine_tag: regional-arm
           policy: cloudonly
           remote_region: regional
       - id: edge-arm-workers
@@ -132,6 +152,7 @@ regions:
       rings:
       - id: regional-arm
         arch: arm64
+        machine_tag: arm64/gateway-arm/regional-arm
         memory_mb: 512
         cpus: 1.0
         nodes:

@@ -10,6 +10,8 @@ from ..request import Request
 
 @dataclass(frozen=True)
 class RegionDeliveryEvent(Event):
+    """Evento di consegna di una richiesta inoltrata a una regione remota."""
+
     request: Request
     region: Region
     node: Node | None = None

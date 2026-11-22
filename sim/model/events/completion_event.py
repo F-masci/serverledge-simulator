@@ -8,6 +8,8 @@ from ..request import Request
 
 @dataclass(frozen=True)
 class CompletionEvent(Event):
+    """Evento di fine servizio di una richiesta accettata."""
+
     request: Request
 
     def execute(self) -> None:
@@ -31,13 +33,20 @@ class CompletionEvent(Event):
 
 @dataclass(frozen=True)
 class ResponseEvent(Event):
+    """Evento di consegna al client della risposta (o del rifiuto) da una regione remota."""
+
     request: Request
 
     def execute(self) -> None:
-        """Completa la risposta della richiesta."""
+        """Completa la risposta o il rifiuto della richiesta."""
         request = self.request
         if not request.is_responding:
             raise ValueError('La richiesta non ha una risposta in transito')
+
+        # Distingue un rifiuto remoto in transito da un completamento ordinario.
+        if request.rejection_reason is not None:
+            request.finish_rejection()
+            return
 
         # Completa la risposta della richiesta; on_completed notifica l'osservatore.
         request.finish_response()

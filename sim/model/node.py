@@ -5,6 +5,7 @@ I contatori busy/warm rappresentano prenotazioni, non consumo fisico misurato.
 from __future__ import annotations
 
 import json
+import math
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -13,14 +14,16 @@ from itertools import count
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
+from sim.random.streams import RandomStreams, StreamKind
 from sim.utils.validation import integer, nonnegative_number
 from .container import DockerContainer, ContainerState
 from .function import Function
-from .offloading import NodeScheduling, OffloadingScheduler
+from .offloading import DefaultScheduler, NodeScheduling, OffloadingScheduler
 from .pool import ContainerPool
 from .request import Request
 
 if TYPE_CHECKING:
+    from numpy.random import Generator
     from .region import Region
     from .infrastructure import Infrastructure
     from .ring import ArchitectureRing
@@ -28,6 +31,8 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class NodeID:
+    """Identità immutabile di un nodo nella topologia (chiave, architettura e machine tag)."""
+
     key: str
     arch: str
     machine_tag: str
@@ -41,7 +46,6 @@ class Resources:
     """
 
     def __init__(self, total_memory: int, total_cpus: float) -> None:
-        import math
         if total_memory < 1 or not math.isfinite(total_cpus) or total_cpus <= 0:
             raise ValueError('Capacità del nodo non valide')
         self._total_memory = total_memory
@@ -127,12 +131,13 @@ class Node:
         idle_timeout: float = 600,
         queue_capacity: int = 0,
         ring: 'ArchitectureRing | None' = None,
+        eviction_rng: 'Generator | None' = None,
     ) -> None:
-        # Identificativo univoco del nodo
+        # Identificativo univoco del nodo; stringa vuota o None ricadono sull'architettura come in Go.
         self._id = NodeID(
             key=name,
             arch=arch,
-            machine_tag=arch if machine_tag is None else machine_tag,
+            machine_tag=arch if not machine_tag else machine_tag,
         )
         # Infrastruttura
         self._ring = ring
@@ -140,9 +145,14 @@ class Node:
         # Risorse locali e pool di container
         self._resources = Resources(total_memory=memory, total_cpus=cpus)
         self._pools: dict[str, ContainerPool] = {}
-        self._pending: dict[DockerContainer, bool] = {}
+        self._pending: set[DockerContainer] = set()
         self._container_ids = count(1)
         self._idle_timeout = nonnegative_number(idle_timeout, 'node.idle_timeout')
+        self._eviction_rng = (
+            RandomStreams(0).stream(StreamKind.EVICTION, name)
+            if eviction_rng is None
+            else eviction_rng
+        )
 
         # Scheduler e coda FIFO
         self._scheduler = OffloadingScheduler.create(tuple, NodeScheduling())
@@ -194,7 +204,7 @@ class Node:
         return self._scheduler
 
     @scheduler.setter
-    def scheduler(self, value):
+    def scheduler(self, value: OffloadingScheduler) -> None:
         self._scheduler = value
 
     ### Node State ###
@@ -230,11 +240,26 @@ class Node:
     ### Resources ###
 
     def can_allocate(self, function: Function) -> bool:
-        """Verifica se il nodo può allocare risorse per la funzione."""
+        """Verifica se il nodo può eseguire subito la funzione (riuso busy o risorse disponibili)."""
+        pool = self._pools.get(function.name)
+        if pool is not None and pool.has_reusable_busy():
+            return True
         return (
             self.resources.available_cpus >= function.cpu_demand and
             self.resources.available_memory >= function.memory_mb
         )
+
+    def can_enqueue(self, request: Request) -> bool:
+        """Indica se il nodo può accodare la richiesta nella propria FIFO locale."""
+        return (
+            isinstance(self._scheduler, DefaultScheduler)
+            and len(self._queue) < self._queue_capacity
+            and request.function.supports_arch(self.id.arch)
+        )
+
+    def can_offload_request(self, request: Request) -> bool:
+        """Indica se la policy del nodo può gestire la richiesta tramite offloading."""
+        return request.can_offload and not isinstance(self._scheduler, DefaultScheduler)
 
     #################################
     ### Internal state management ###
@@ -242,7 +267,7 @@ class Node:
 
     ## Request management ##
 
-    def receive(self, request: Request) -> Node | None:
+    def receive(self, request: Request, *, now: float = 0.0) -> Node | None:
         """Applica la policy locale e inoltra la richiesta se necessario."""
         request.ensure_created()
 
@@ -253,13 +278,13 @@ class Node:
         #
         # Lo scheduler esegue la submit locale se la policy lo consente,
         # altrimenti rifiuta la richiesta.
-        target: Node | Region | None = self._scheduler.schedule(request, self)
+        target: Node | Region | None = self._scheduler.schedule(request, self, now=now)
 
         # Se lo scheduler ha scelto un target, si inoltra la richiesta:
         # - verso un altro nodo della stessa regione tramite l'infrastruttura;
         # - verso una regione remota tramite _forward_region.
         if isinstance(target, Node):
-            return self.infrastructure.forward(request, target, source=self)
+            return self.infrastructure.forward(request, target, source=self, now=now)
         if target is not None:
             return self._forward_region(request, target)
 
@@ -281,11 +306,15 @@ class Node:
         assert source is not None
 
         # Se la regione remota è simulata ma priva di load balancer, verifica subito
-        # la presenza e la compatibilità del primo nodo registrato.
+        # la presenza e la compatibilità (architettura e machine tag) del primo nodo registrato.
         target: Node | None = None
         if destination.infrastructure is not None and not destination.has_load_balancer:
             target = destination.first_registered_node()
-            if target is None or not request.function.supports_arch(target.id.arch):
+            if (
+                target is None
+                or not request.function.supports_arch(target.id.arch)
+                or not request.function.supports_machine_tag(target.id.machine_tag)
+            ):
                 request.reject('out_of_resources', node=self)
                 return None
 
@@ -376,7 +405,7 @@ class Node:
 
         # Se non c'è un container riutilizzabile, si tenta di crearne uno nuovo.
         if container is None:
-            return self._reserve_creation(function, idle=False)
+            return self._reserve_creation(function)
 
         # Se il container è busy, lo si riutilizza senza modificare le prenotazioni.
         if container.is_busy:
@@ -390,34 +419,30 @@ class Node:
             if self.resources.available_cpus < function.cpu_demand:
                 return None
 
-            # Si riattiva il container idle e si aggiornano le prenotazioni
-            # prima della transizione affinché le callback osservino le risorse aggiornate.
+            # Si aggiornano pool e prenotazioni prima della transizione affinché
+            # le callback osservino sia risorse sia pool già coerenti.
             container = pool.pop_idle()
             self.resources.activate(function)
+            pool.add_busy(container)
             container.acquire()
-            pool.add(container)
 
             return container
 
         # Se il container non è né busy né idle, non è riutilizzabile.
         return None
 
-    def prewarm(self, function: Function) -> DockerContainer | None:
-        """Riserva un container destinato al pool idle."""
-        self._get_pool(function)
-        return self._reserve_creation(function, idle=True)
-
-    def _reserve_creation(self, function: Function, *, idle: bool) -> DockerContainer | None:
+    def _reserve_creation(self, function: Function) -> DockerContainer | None:
         """
-        Riserva la creazione di un nuovo container, se le risorse lo consentono
+        Riserva la creazione di un nuovo container, se le risorse lo consentono.
 
-        Se idle è True, il container sarà destinato al pool idle; altrimenti sarà destinato a un uso immediato.
         Restituisce il container riservato o None se le risorse non sono sufficienti.
         Viene effettuata una verifica delle risorse disponibili e, se necessario, vengono distrutti
         container idle per liberare memoria.
         """
-        if self.resources.available_cpus < function.cpu_demand: return None
-        if self.resources.available_memory < function.memory_mb: return None
+        if self.resources.available_cpus < function.cpu_demand:
+            return None
+        if self.resources.available_memory < function.memory_mb:
+            return None
 
         # Se non ci sono abbastanza risorse disponibili, si cerca di liberare memoria.
         deficit = function.memory_mb - self.resources.free_memory
@@ -426,10 +451,10 @@ class Node:
             return None
 
         # Se le risorse sono sufficienti, si riserva la creazione del container e si aggiorna lo stato.
-        self.resources.reserve(function, idle=idle)
+        self.resources.reserve(function, idle=False)
         container = DockerContainer(f'{self.id.key}/c{next(self._container_ids)}', function, node=self)
         self._bind_container_callbacks(container)
-        self._pending[container] = idle
+        self._pending.add(container)
         if self.on_container_state_changed is not None:
             self.on_container_state_changed(self, container, None, container.state)
         return container
@@ -442,8 +467,12 @@ class Node:
         candidates = []
         reclaimable = 0
 
-        # Raccoglie i candidati nell'ordine dei pool e delle rispettive liste idle.
-        for pool in self._pools.values():
+        # Mescola l'ordine dei pool per replicare l'iterazione non deterministica delle map Go.
+        pools = list(self._pools.values())
+        if len(pools) > 1:
+            self._eviction_rng.shuffle(pools)
+
+        for pool in pools:
             for container in pool.idle:
                 candidates.append(container)
                 reclaimable += container.function.memory_mb
@@ -467,12 +496,12 @@ class Node:
         if container not in self._pending:
             raise ValueError('Container non in pending')
 
-        # Se la creazione è riuscita, si rimuove il container dalla lista
-        # pending e lo si aggiunge al pool.
-        idle = self._pending.pop(container)
-        container.created(idle=idle, now=now, timeout=self._idle_timeout)
+        # Aggiorna pending e pool prima di notificare la creazione affinché le callback
+        # osservino il container già presente nel pool busy.
+        self._pending.remove(container)
         pool = self._get_pool(container.function)
-        pool.add(container)
+        pool.add_busy(container)
+        container.created()
 
     def complete(self, container: DockerContainer, now: float) -> None:
         """Segnala il completamento di una richiesta e aggiorna lo stato del container."""
@@ -482,20 +511,15 @@ class Node:
         if pool is None or container not in pool.busy:
             raise ValueError('Container non attivo su questo nodo')
 
-        # Se questa è l'ultima richiesta attiva, si aggiornano pool e prenotazioni
-        # prima della transizione a IDLE affinché le callback osservino le risorse aggiornate.
+        # Se questa è l'ultima richiesta attiva, aggiorna pool e prenotazioni
+        # prima della transizione a IDLE affinché le callback osservino lo stato coerente.
         if container.requests_count == 1:
             pool.remove_busy(container)
             self.resources.deactivate(container.function)
+            pool.add_idle(container)
 
         # Segna il completamento della richiesta e aggiorna lo stato del container.
         container.complete(now, self._idle_timeout)
-
-        # Se il container è tornato idle, lo si registra nel pool idle.
-        #
-        # TODO: spostare la logica di inversione della lista nell callback on_idle del container
-        if container.is_idle:
-            pool.add(container)
 
         # Dopo il completamento, si tenta di ammettere le richieste in attesa nella coda FIFO.
         self.dispatch_waiting()
@@ -505,16 +529,18 @@ class Node:
         pool = self._get_pool(container.function)
 
         # Se il container non è scaduto o non è nel pool idle, non si fa nulla.
-        if not container.is_expired(now): return
-        if container not in pool.idle: return
+        if not container.is_expired(now):
+            return
+        if container not in pool.idle:
+            return
 
-        # Se il container è scaduto e nel pool idle, lo si distrugge e si aggiornano le prenotazioni.
-        self._destroy_idle(container)
+        # Come DeleteExpiredContainer in Go, compatta la lista idle preservando l'ordine.
+        self._destroy_idle(container, preserve_order=True)
 
-    def _destroy_idle(self, container: DockerContainer) -> None:
+    def _destroy_idle(self, container: DockerContainer, *, preserve_order: bool = False) -> None:
         """Rimuove un container idle dal pool e aggiorna le prenotazioni."""
         pool = self._get_pool(container.function)
-        pool.remove_idle(container)
+        pool.remove_idle(container, preserve_order=preserve_order)
         self.resources.release(container.function, idle=True)
         container.destroy()
 
@@ -569,10 +595,7 @@ class Node:
                 'available_cpus': resources.available_cpus,
             },
             'pools': {name: pool.to_dict() for name, pool in self._pools.items()},
-            'pending': [
-                {**container.to_dict(), 'prewarm': idle}
-                for container, idle in self._pending.items()
-            ],
+            'pending': [container.to_dict() for container in self._pending],
             'queue_capacity': self._queue_capacity,
             'queue': [request.id for request in self._queue],
         }

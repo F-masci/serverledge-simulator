@@ -3,7 +3,6 @@
 from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-import json
 
 from sim.observer.notifications import (
     Notification, NotificationType, RequestAccepted, RequestArrived, RequestCompleted,
@@ -123,10 +122,6 @@ class _InvocationMetrics:
             'service_time_variance_s2': self.service_time.variance,
             'mean_network_latency_s': self.network_latency.mean,
         }
-
-    def to_json(self, now: float = 0.0) -> str:
-        """Serializza in JSON lo snapshot delle metriche di invocazione."""
-        return json.dumps(self.to_dict(now), ensure_ascii=False, allow_nan=False)
 
 
 class _InvocationMetricsCollector(MetricCollector):

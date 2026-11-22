@@ -15,6 +15,8 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class ArrivalEvent(Event):
+    """Evento di arrivo esterno di una nuova invocazione."""
+
     function: Function
     entry_region: Region
     entry_node: 'Node | None'
@@ -31,7 +33,7 @@ class ArrivalEvent(Event):
         engine = self.ctx.engine
         sampler = self.function.sampler
         if sampler is None:
-            raise RuntimeError('La funzione dell’arrivo deve avere un campionatore')
+            raise RuntimeError("La funzione dell'arrivo deve avere un campionatore")
 
         # TODO: campionare servizio e cold start dopo il placement, da profili
         # calibrati per funzione e destinazione (architettura, capacità e carico).

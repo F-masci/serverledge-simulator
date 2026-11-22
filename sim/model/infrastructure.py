@@ -8,11 +8,12 @@ from typing import TYPE_CHECKING
 from .load_balancer import LoadBalancer, RandomLoadBalancer
 from .node import Node
 from .offloading import NodeScheduling, OffloadingScheduler
-from .request import Request, RequestStatus
+from .request import Request
 from .ring import ArchitectureRing
 from ..utils.validation import nonempty_string
 
 if TYPE_CHECKING:
+    from numpy.random import Generator
     from sim.bindings import NodeBindings
     from .region import Region
 
@@ -53,7 +54,7 @@ class Infrastructure:
     def create_ring(
         self, ring_id: str, *,
         arch: str | None = None, memory: int | None = None, cpus: float | None = None,
-        replicas: int | None = None,
+        replicas: int | None = None, machine_tag: str | None = None,
     ) -> ArchitectureRing:
         """Crea un anello configurato o restituisce quello identificato dall'ID."""
         ring_id = nonempty_string(ring_id, 'ring_id')
@@ -65,10 +66,14 @@ class Infrastructure:
 
         if arch is None or memory is None or cpus is None:
             raise ValueError('Un nuovo anello richiede architettura, CPU e memoria')
+        resolved_tag = arch if not machine_tag else nonempty_string(machine_tag, 'machine_tag')
+        if any(existing.machine_tag == resolved_tag for existing in self._rings.values()):
+            raise ValueError(f'Esiste già un anello per il machine_tag: {resolved_tag}')
+
         replicas = 128 if replicas is None else replicas
         ring = ArchitectureRing(
             ring_id, arch, memory, cpus, infrastructure=self, replicas=replicas,
-            node_bindings=self._node_bindings,
+            machine_tag=resolved_tag, node_bindings=self._node_bindings,
         )
 
         # Registra l'anello prima di notificare la creazione.
@@ -80,6 +85,7 @@ class Infrastructure:
     def create_node(
         self, ring_id: str, name: str, machine_tag: str | None = None,
         *, idle_timeout: float = 600, queue_capacity: int = 0,
+        eviction_rng: 'Generator | None' = None,
     ) -> Node:
         """Crea un nodo nell'anello specificato, che deve già esistere."""
         ring = self.get_ring(ring_id)
@@ -87,7 +93,10 @@ class Infrastructure:
             raise ValueError(f'Anello non trovato: {ring_id}')
 
         # L'anello registra il nodo prima della notifica.
-        node = ring.create_node(name, machine_tag, idle_timeout=idle_timeout, queue_capacity=queue_capacity)
+        node = ring.create_node(
+            name, machine_tag,
+            idle_timeout=idle_timeout, queue_capacity=queue_capacity, eviction_rng=eviction_rng,
+        )
         if self.on_node_created is not None:
             self.on_node_created(self, ring, node)
         return node
@@ -123,35 +132,29 @@ class Infrastructure:
         """Riceve un'invocazione al bilanciatore oppure direttamente a un nodo."""
         request.ensure_created()
         if node is None:
-            destination = self._route(request)
+            destination = self._route(request, now=now)
         else:
-            destination = self._submit_to_node(request, node)
+            destination = self._submit_to_node(request, node, now=now)
 
         if self.on_request_submitted is not None:
             self.on_request_submitted(self, request, destination)
         return destination
 
-    def _route(self, request: Request) -> Node | None:
-        rings = self._load_balancer.candidate_rings(request, self._rings.values())
-        for ring in rings:
-            destination = ring.submit(request)
-            if request.status is not RequestStatus.CREATED:
-                # La risposta dello scheduler arriva dopo la selezione del proxy.
-                return destination
-        request.reject('out_of_resources' if rings else 'no_destination')
-        return None
+    def _route(self, request: Request, *, now: float = 0.0) -> Node | None:
+        return self._load_balancer.route(request, self._rings.values(), now=now)
 
-    def _submit_to_node(self, request: Request, node: Node) -> Node | None:
+    def _submit_to_node(self, request: Request, node: Node, *, now: float = 0.0) -> Node | None:
         ring = node.ring
         if ring is None or ring.infrastructure is not self or node not in ring:
             request.reject('no_destination')
             return None
-        return node.receive(request)
+        return node.receive(request, now=now)
 
-    def forward(self, request: Request, target: Node, *, source: Node) -> Node | None:
+    def forward(self, request: Request, target: Node, *, source: Node, now: float = 0.0) -> Node | None:
         """Consegna l'invocazione al nodo vicino scelto dalla policy di offloading."""
+        # TODO: modellare la latenza di rete edge-to-edge (coordinate Vivaldi) per l'offloading intra-regione.
         request.mark_offloaded(source)
-        return self._submit_to_node(request, target)
+        return self._submit_to_node(request, target, now=now)
 
     #####################
     ### Serialization ###

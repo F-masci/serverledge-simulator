@@ -38,7 +38,7 @@ class Scenario:
         *, infrastructure: Mapping[str, object] | None = None,
         containers: Mapping[str, object] | None = None,
         scheduler: Mapping[str, object] | None = None,
-        load_balancer: str = LoadBalancerMode.RANDOM,
+        load_balancer: LoadBalancerMode | str = LoadBalancerMode.RANDOM,
         invocation: Mapping[str, object] | None = None,
         regions: Mapping[str, object] | None = None,
         primary_region: str | None = None,
@@ -102,14 +102,14 @@ class Scenario:
         for name, region in configured.items():
             for source in region.offload_latency_by_source_s:
                 if source not in configured or source == name:
-                    raise ValueError(f'regions.{name}.offload_latency_by_source_s richiede un’altra regione censita: {source}')
+                    raise ValueError(f"regions.{name}.offload_latency_by_source_s richiede un'altra regione censita: {source}")
             if region.infrastructure is None:
                 continue
             for ring in region.infrastructure.rings:
                 for node in ring.nodes:
                     remote = node.remote_region
                     if remote is not None and (remote not in configured or remote == name):
-                        raise ValueError(f'node.remote_region deve indicare un’altra regione censita: {remote}')
+                        raise ValueError(f"node.remote_region deve indicare un'altra regione censita: {remote}")
 
         # Espone la configurazione regionale in sola lettura.
         object.__setattr__(self, 'primary_region', primary)
@@ -135,8 +135,8 @@ class Scenario:
                 function = definition
             else:
                 try:
-                    fConf = _FunctionConfig.parse(definition, startup_times=self.containers.startup_times)
-                    function = fConf.build_function()
+                    function_config = _FunctionConfig.parse(definition, startup_times=self.containers.startup_times)
+                    function = function_config.build_function()
                 except ValueError as error:
                     raise ValueError(f'functions[{index}]: {error}') from error
 

@@ -11,15 +11,16 @@ from .request import Request
 from ..utils.validation import nonempty_string, positive_integer, positive_number
 
 if TYPE_CHECKING:
+    from numpy.random import Generator
     from sim.bindings import NodeBindings
     from .region import Region
     from .infrastructure import Infrastructure
 
 
 class ArchitectureRing:
-    """Possiede i riferimenti ai nodi in ordine di inserimento.
+    """Possiede i riferimenti ai nodi di un singolo machine_tag in ordine di inserimento.
 
-    Ogni nodo eredita architettura e capacità CPU/RAM dall'anello.
+    Ogni nodo eredita architettura, machine_tag e capacità CPU/RAM dall'anello.
     La selezione usa consistent hashing con repliche virtuali.
     """
 
@@ -32,13 +33,15 @@ class ArchitectureRing:
         infrastructure: 'Infrastructure',
         replicas: int = 128,
         *,
+        machine_tag: str | None = None,
         node_bindings: 'NodeBindings | None' = None,
     ) -> None:
         # Identificatore univoco dell'anello
         self._id = nonempty_string(ring_id, 'ring_id')
 
-        # Capacità comuni a tutti i nodi dell'anello
+        # Capacità e machine_tag comuni a tutti i nodi dell'anello (1 ring = 1 machine_tag come in Go)
         self._arch = nonempty_string(arch, 'arch')
+        self._machine_tag = self._arch if not machine_tag else nonempty_string(machine_tag, 'machine_tag')
         self._memory = positive_integer(memory, 'memory')
         self._cpus = positive_number(cpus, 'cpus')
 
@@ -65,6 +68,11 @@ class ArchitectureRing:
     def arch(self) -> str:
         """Restituisce l'architettura comune ai nodi dell'anello."""
         return self._arch
+
+    @property
+    def machine_tag(self) -> str:
+        """Restituisce il machine_tag comune ai nodi dell'anello."""
+        return self._machine_tag
 
     ### Infrastructure ###
 
@@ -94,16 +102,25 @@ class ArchitectureRing:
     def create_node(
         self, name: str, machine_tag: str | None = None,
         *, idle_timeout: float = 600, queue_capacity: int = 0,
+        eviction_rng: 'Generator | None' = None,
     ) -> Node:
-        """Crea un nodo con le capacità e l'architettura dell'anello."""
+        """Crea un nodo con le capacità, l'architettura e il machine_tag dell'anello."""
         name = nonempty_string(name, 'name')
 
         if any(node.key == name for node in self._nodes):
             raise ValueError(f'Nodo già presente nell\'anello: {name}')
 
+        # Tutti i nodi dell'anello devono condividere lo stesso machine_tag (1 ring = 1 machine_tag).
+        effective_tag = self._machine_tag if not machine_tag else nonempty_string(machine_tag, 'machine_tag')
+        if effective_tag != self._machine_tag:
+            raise ValueError(
+                f"machine_tag del nodo ({effective_tag}) incompatibile con quello dell'anello ({self._machine_tag})"
+            )
+
         node = Node(
-            name, self._memory, self._cpus, self._arch, machine_tag,
+            name, self._memory, self._cpus, self._arch, self._machine_tag,
             idle_timeout=idle_timeout, queue_capacity=queue_capacity, ring=self,
+            eviction_rng=eviction_rng,
         )
 
         # Registra le repliche virtuali e il nodo prima di applicare i binding e notificare.
@@ -149,30 +166,18 @@ class ArchitectureRing:
 
     def _candidates(self, function: Function) -> Iterator[Node]:
         """Visita i nodi fisici una sola volta, a partire dal successore dell'hash."""
-        matching = None
-
-        # Filtra i nodi compatibili con il tag della funzione, se presente.
-        if function.tag_pattern:
-            matching = {
-                node for node in self._nodes
-                if function.supports_machine_tag(node.id.machine_tag)
-            }
-            if not matching:
-                return
-
-
-        target_count = len(self._nodes) if matching is None else len(matching)
+        target_count = len(self._nodes)
         size = len(self._positions)
+        if target_count == 0 or size == 0:
+            return
 
         # Trova la posizione iniziale dell'hash della funzione e visita i nodi in ordine circolare.
         start = bisect_left(self._positions, self._hash(function.name))
         seen: set[Node] = set()
         for offset in range(size):
             targets = self._targets[self._positions[(start + offset) % size]]
-            node = targets[-1] if matching is None else next(
-                (target for target in reversed(targets) if target in matching), None,
-            )
-            if node is None or node in seen:
+            node = targets[-1]
+            if node in seen:
                 continue
             seen.add(node)
             yield node
@@ -195,17 +200,29 @@ class ArchitectureRing:
 
     ## Request management ##
 
-    def submit(self, request: Request) -> Node | None:
+    def submit(
+        self, request: Request, *, now: float = 0.0, allow_saturated: bool = False,
+    ) -> Node | None:
         """Seleziona un nodo idoneo con l'hash e gli consegna l'invocazione."""
         request.ensure_created()
         function = request.function
 
-        # TODO: separare le risorse correnti dalla vista del proxy, come la NodeMetricCache Go aggiornata dai polling e dalle risposte dei nodi.
-        node = next((c for c in self._candidates(function) if c.can_allocate(function)), None)
+        # TODO: modellare NodeMetricCache del proxy (polling periodico /status,
+        # decremento ottimistico in Next() e riconciliazione tramite header di risposta).
+        if allow_saturated:
+            node = next(
+                (
+                    c for c in self._candidates(function)
+                    if c.can_enqueue(request) or c.can_offload_request(request)
+                ),
+                None,
+            )
+        else:
+            node = next((c for c in self._candidates(function) if c.can_allocate(function)), None)
         if node is None:
             return None
 
-        destination = node.receive(request)
+        destination = node.receive(request, now=now)
         return destination
 
     #####################
@@ -215,7 +232,7 @@ class ArchitectureRing:
     def __str__(self) -> str:
         """Restituisce una descrizione leggibile dell'anello."""
         return (
-            f'ArchitectureRing(id={self._id}, arch={self._arch}, '
+            f'ArchitectureRing(id={self._id}, arch={self._arch}, machine_tag={self._machine_tag}, '
             f'memory_mb={self._memory}, cpus={self._cpus}, nodes={len(self._nodes)})'
         )
 
@@ -224,6 +241,7 @@ class ArchitectureRing:
         return {
             'id': self._id,
             'arch': self._arch,
+            'machine_tag': self._machine_tag,
             'memory_mb': self._memory,
             'cpus': self._cpus,
             'replicas': self._replicas,

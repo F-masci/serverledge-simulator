@@ -161,11 +161,32 @@ class RegionsTest(unittest.TestCase):
         self.assertEqual(stats['total']['rejected'], 1)
         self.assertEqual(stats['regional_offloads'], [{'source': 'edge', 'destination': 'relay', 'count': 1}])
 
+    def test_remote_rejection_pays_return_latency(self):
+        scenario = Scenario([FUNCTION], invocation={'can_offload': True}, regions={
+            'edge': simulated_region(policy='cloudonly', remote_region='relay'),
+            'relay': simulated_region(latency=4, policy='cloudonly', remote_region='cloud'),
+            'cloud': {'mode': 'always_succeeds'},
+        })
+        simulation = Simulation(scenario)
+        simulation.run(arrivals=1)
+
+        # Alla consegna (t=2) il rifiuto entra in fase di ritorno; il rifiuto finale arriva a t=4.
+        self.advance_to(simulation, 2)
+        self.assertEqual(simulation.metrics_snapshot()['total']['rejected'], 0)
+
+        self.advance_to(simulation, 4)
+        self.assertEqual(simulation.metrics_snapshot()['total']['rejected'], 1)
+        rejected, = [
+            event for event in self.notifications
+            if event.run_id == simulation.run_id and event.type is NotificationType.REQUEST_REJECTED
+        ]
+        self.assertEqual(rejected.sim_time_s, 4)
+
     def test_remote_region_uses_the_balancer_or_checks_the_registered_node(self):
         cloud = simulated_region()
         cloud['infrastructure']['rings'].insert(0, {
-            'id': 'arm', 'arch': 'arm64', 'memory_mb': 128, 'cpus': 1,
-            'nodes': [{'name': 'first', 'machine_tag': 'a'}],
+            'id': 'arm', 'arch': 'arm64', 'machine_tag': 'a', 'memory_mb': 128, 'cpus': 1,
+            'nodes': [{'name': 'first'}],
         })
         function = dict(FUNCTION, supported_archs=['amd64'])
         for enabled in (False, True):

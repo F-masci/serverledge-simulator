@@ -9,6 +9,8 @@ from ..request import Request
 
 @dataclass(frozen=True)
 class ContainerReadyEvent(Event):
+    """Evento di completamento della creazione (cold start) di un container."""
+
     request: Request
 
     def execute(self) -> None:

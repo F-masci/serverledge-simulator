@@ -151,11 +151,11 @@ class SimulationMetrics:
                     'by_function': {
                         name: {
                             **self._invocations.node_function_snapshot(key, name, now),
-                            'containers': self._containers.snapshot_for(now, key, name),
+                            'containers': self._containers.snapshot_for(key, name, now),
                         }
                         for name in node_functions
                     },
-                    'containers': self._containers.snapshot_for(now, key),
+                    'containers': self._containers.snapshot_for(key, now=now),
                 }
                 nodes[node.id.key] = node_snapshot
             nodes_by_ring[ring_id] = nodes
@@ -170,7 +170,7 @@ class SimulationMetrics:
             rings[ring_id] = {
                 'nodes_count': len(node_list),
                 'invocations': self._invocations.ring_snapshot(ring_key, now),
-                'containers': self._containers.ring_snapshot(now, ring_key),
+                'containers': self._containers.ring_snapshot(ring_key, now),
                 'resources': self._aggregate_resources(node_list),
                 'load_balance_ratio': self._load_balance_ratio(node_list),
                 'topology': self._topology.ring_snapshot(ring_key, now),
@@ -198,12 +198,12 @@ class SimulationMetrics:
             'time_s': now,
             'total': {
                 **self._invocations.total_snapshot(now),
-                'containers': self._containers.snapshot_for(now),
+                'containers': self._containers.snapshot_for(now=now),
             },
             'by_function': {
                 name: {
                     **self._invocations.function_snapshot(name, now),
-                    'containers': self._containers.snapshot_for(now, name=name),
+                    'containers': self._containers.snapshot_for(name=name, now=now),
                 }
                 for name in all_functions
             },

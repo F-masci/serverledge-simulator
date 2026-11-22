@@ -16,6 +16,22 @@ if TYPE_CHECKING:
     from sim.model.ring import ArchitectureRing
 
 
+_STR_LABELS: dict[str, str] = {
+    'request_id': 'richiesta',
+    'function': 'funzione',
+    'region': 'regione',
+    'ring_id': 'anello',
+    'node_id': 'nodo',
+    'source_region': 'origine',
+    'warm': 'warm',
+    'queue_wait_s': 'attesa_coda_s',
+    'reason': 'motivo',
+    'container_id': 'container',
+    'response_time_s': 'tempo_risposta_s',
+    'service_time_s': 'tempo_servizio_s',
+}
+
+
 @dataclass(frozen=True)
 class _RequestNotification(Notification, ABC):
     """Base comune per le notifiche associate a una richiesta di invocazione."""
@@ -48,7 +64,11 @@ class _RequestNotification(Notification, ABC):
 
     def __str__(self) -> str:
         data = self.to_dict()['data']
-        details = ' '.join(f'{name}={value}' for name, value in data.items() if value is not None)
+        details = ' '.join(
+            f'{_STR_LABELS.get(name, name)}={value}'
+            for name, value in data.items()
+            if value is not None
+        )
         return f'[{self.sim_time_s:.6g} s] {self.type.value} {details}'
 
     def to_dict(self) -> dict:

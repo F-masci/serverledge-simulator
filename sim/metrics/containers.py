@@ -1,7 +1,6 @@
 """Collector delle metriche del ciclo di vita, riuso e permanenza idle dei container."""
 
 from collections.abc import Iterator
-import json
 
 from sim.model.container import ContainerState
 from sim.observer.notifications import (
@@ -103,10 +102,6 @@ class _ContainerMetrics:
             },
         }
 
-    def to_json(self, now: float) -> str:
-        """Serializza in JSON lo snapshot delle metriche dei container."""
-        return json.dumps(self.to_dict(now), ensure_ascii=False, allow_nan=False)
-
 
 class _ContainerMetricsCollector(MetricCollector):
     """Raccoglie conteggi, transizioni, eviction, tempi di creazione e permanenza idle dei container."""
@@ -147,13 +142,13 @@ class _ContainerMetricsCollector(MetricCollector):
         return set(self._container_functions_by_node.get(key, set()))
 
     def snapshot_for(
-        self, now: float, key: NodeKey | None = None, name: str | None = None,
+        self, key: NodeKey | None = None, name: str | None = None, now: float = 0.0,
     ) -> dict:
         """Restituisce lo snapshot container per lo scope (nodo, funzione) richiesto."""
         stats = self._containers.get((key, name))
         return (stats if stats is not None else _ContainerMetrics()).to_dict(now)
 
-    def ring_snapshot(self, now: float, key: RingKey) -> dict:
+    def ring_snapshot(self, key: RingKey, now: float = 0.0) -> dict:
         """Restituisce lo snapshot container aggregato per il ring indicato."""
         stats = self._by_ring.get(key)
         return (stats if stats is not None else _ContainerMetrics()).to_dict(now)
@@ -242,9 +237,9 @@ class _ContainerMetricsCollector(MetricCollector):
     def to_dict(self, now: float = 0.0) -> dict:
         """Restituisce lo snapshot aggregato dei container per totale, funzione e ring."""
         return {
-            'total': self.snapshot_for(now),
+            'total': self.snapshot_for(now=now),
             'by_function': {
-                name: self.snapshot_for(now, name=name)
+                name: self.snapshot_for(name=name, now=now)
                 for name in sorted(self._container_functions)
             },
             'by_ring': {

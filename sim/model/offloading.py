@@ -44,6 +44,7 @@ class NodeScheduling:
     fallback_local: bool = False
     nearest_neighbors: tuple[Node, ...] | None = None
     remote_region: 'Region | None' = None
+    offloading_cache_validity_s: float = 60.0
 
     #####################
     ### Serialization ###
@@ -66,6 +67,7 @@ class NodeScheduling:
                 else None
             ),
             'remote_region': self.remote_region.name if self.remote_region is not None else None,
+            'offloading_cache_validity_s': self.offloading_cache_validity_s,
         }
 
     def to_json(self) -> str:
@@ -95,7 +97,7 @@ class OffloadingScheduler(ABC):
         return _SCHEDULER_TYPES[settings.policy](nodes, settings)
 
     @abstractmethod
-    def schedule(self, request: Request, node: Node) -> 'Node | Region | None':
+    def schedule(self, request: Request, node: Node, *, now: float = 0.0) -> 'Node | Region | None':
         """Restituisce un destinatario per l'inoltro o None dopo una decisione locale."""
 
     @staticmethod
@@ -139,7 +141,7 @@ class OffloadingScheduler(ABC):
 class DefaultScheduler(OffloadingScheduler):
     """Esegue le invocazioni sul nodo di ingresso con la sua FIFO locale."""
 
-    def schedule(self, request: Request, node: Node) -> None:
+    def schedule(self, request: Request, node: Node, *, now: float = 0.0) -> None:
         """Consegna la richiesta al nodo se l'architettura è compatibile."""
         self._submit_locally(request, node, allow_queue=True)
 
@@ -147,17 +149,23 @@ class DefaultScheduler(OffloadingScheduler):
 class EdgeOnlyScheduler(OffloadingScheduler):
     """Delega l'esecuzione ai vicini della stessa regione."""
 
-    def schedule(self, request: Request, node: Node) -> Node | None:
+    def __init__(self, nodes: Callable[[], tuple[Node, ...]], settings: NodeScheduling) -> None:
+        super().__init__(nodes, settings)
+        # Cache per funzione del nodo di offloading scelto (offloading.cache.validity in Go).
+        self._cache: dict[str, tuple[Node, float]] = {}
+
+    def schedule(self, request: Request, node: Node, *, now: float = 0.0) -> Node | None:
         """Sceglie un vicino o tenta l'esecuzione locale secondo il fallback configurato."""
 
         # Se l'invocazione può essere inoltrata, cerca un vicino compatibile con più memoria disponibile.
         if request.can_offload:
-            target = self._edge_target(request, node, self._settings.nearest_neighbors)
+            target, has_neighbors = self._edge_target(request, node, self._settings.nearest_neighbors, now=now)
             if target is not None:
                 return target
 
-            # Se il fallback locale non è abilitato, rifiuta la richiesta.
-            if not self._settings.fallback_local:
+            # Come in EdgePolicy.OnArrival di Serverledge: il fallback locale si applica
+            # solo se esistono vicini ma nessuno è idoneo (NoSuitableNode), non se mancano vicini (NoNeighbors).
+            if not has_neighbors or not self._settings.fallback_local:
                 request.reject('out_of_resources', node=node)
                 return None
 
@@ -166,21 +174,36 @@ class EdgeOnlyScheduler(OffloadingScheduler):
 
         return None
 
-    def _edge_target(self, request: Request, node: Node, neighbors: tuple[Node, ...] | None) -> Node | None:
-        """Sceglie il vicino compatibile con più memoria disponibile al momento."""
+    def _edge_target(
+        self, request: Request, node: Node, neighbors: tuple[Node, ...] | None, *, now: float = 0.0,
+    ) -> tuple[Node | None, bool]:
+        """Sceglie il vicino compatibile con più memoria disponibile, con cache per funzione."""
         # Vengono estratti tutti i nodi registrati nella regione del nodo, escludendo il nodo stesso.
         # Se sono specificati vicini, vengono filtrati tra quelli registrati.
         #
-        # TODO: modellare lo snapshot periodico del registry e il ritardo di scoperta.
+        # TODO: modellare coordinate Vivaldi, probing UDP periodico (20s) e ritardo di rete edge-to-edge.
         nodes = self._nodes()
-        peers = (peer for peer in nodes if peer is not node) # Esclude il nodo stesso dai candidati.
+        peers = tuple(peer for peer in nodes if peer is not node)
+        registered = set(peers)
+
+        # Se presente una voce di cache valida (come offloadingCache in Go), la riutilizza direttamente.
+        validity = self._settings.offloading_cache_validity_s
+        if validity > 0:
+            cached = self._cache.get(request.function.name)
+            if cached is not None:
+                cached_peer, expiration = cached
+                if now < expiration and cached_peer in registered:
+                    return cached_peer, True
+                del self._cache[request.function.name]
 
         # Se non sono specificati vicini, considera i primi due peer registrati come candidati.
         if neighbors is None:
             candidates = tuple(islice(peers, 2))
         else:
-            registered = set(peers)
             candidates = tuple(peer for peer in neighbors if peer in registered)
+
+        if not candidates:
+            return None, False
 
         # Filtra i candidati per trovare quelli compatibili con la funzione richiesta.
         suitable = (
@@ -189,13 +212,16 @@ class EdgeOnlyScheduler(OffloadingScheduler):
         )
 
         # Restituisce il vicino con più memoria disponibile, o None se non ci sono candidati idonei.
-        return max(suitable, key=lambda peer: peer.resources.available_memory, default=None)
+        selected = max(suitable, key=lambda peer: peer.resources.available_memory, default=None)
+        if selected is not None and validity > 0:
+            self._cache[request.function.name] = (selected, now + validity)
+        return selected, True
 
 
 class CloudOnlyScheduler(OffloadingScheduler):
     """Delega l'esecuzione alla regione remota configurata sul nodo."""
 
-    def schedule(self, request: Request, node: Node) -> 'Region | None':
+    def schedule(self, request: Request, node: Node, *, now: float = 0.0) -> 'Region | None':
         """Restituisce la regione remota se l'inoltro è consentito, altrimenti rifiuta."""
 
         # Se l'invocazione non può essere inoltrata, rifiuta la richiesta.
@@ -215,7 +241,7 @@ class CloudOnlyScheduler(OffloadingScheduler):
 class EdgeCloudScheduler(CloudOnlyScheduler):
     """Dà priorità all'esecuzione locale e usa la regione remota come fallback."""
 
-    def schedule(self, request: Request, node: Node) -> 'Region | None':
+    def schedule(self, request: Request, node: Node, *, now: float = 0.0) -> 'Region | None':
         """Tenta l'ammissione locale immediata e applica la policy cloud se fallisce."""
 
         # Se l'invocazione può essere eseguita localmente, tenta l'ammissione senza accodare la richiesta.
@@ -223,7 +249,7 @@ class EdgeCloudScheduler(CloudOnlyScheduler):
             return None
 
         # Se l'ammissione locale fallisce, applica la policy cloud per l'inoltro.
-        return super().schedule(request, node)
+        return super().schedule(request, node, now=now)
 
 _SCHEDULER_TYPES: dict[SchedulingPolicy, type[OffloadingScheduler]] = {
     SchedulingPolicy.DEFAULT: DefaultScheduler,

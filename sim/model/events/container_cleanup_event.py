@@ -12,6 +12,8 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class ContainerCleanupEvent(Event):
+    """Evento periodico del janitor per verificare la scadenza di un container idle."""
+
     node: 'Node'
     container: 'DockerContainer'
 

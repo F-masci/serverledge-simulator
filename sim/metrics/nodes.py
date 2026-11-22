@@ -1,7 +1,5 @@
 """Collector delle metriche di prenotazione e utilizzo delle risorse dei nodi."""
 
-import json
-
 from sim.model.node import Node
 from sim.observer.notifications import (
     ContainerStateChanged, NodeRegistered, Notification, NotificationType,
@@ -69,10 +67,6 @@ class _NodeResourceMetrics:
             ),
             'time_weighted_resources': time_weighted,
         }
-
-    def to_json(self, now: float) -> str:
-        """Serializza in JSON lo snapshot delle risorse del nodo."""
-        return json.dumps(self.to_dict(now), ensure_ascii=False, allow_nan=False)
 
 
 class _NodeMetricsCollector(MetricCollector):

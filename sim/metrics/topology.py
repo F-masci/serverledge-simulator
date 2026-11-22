@@ -1,7 +1,5 @@
 """Collector delle metriche topologiche e di capacità allocata nel tempo (autoscaling)."""
 
-import json
-
 from sim.observer.notifications import NodeRegistered, Notification, NotificationType
 from sim.utils.welford import TimedWelford
 from .base import MetricCollector, NodeKey, RingKey, timed_snapshot
@@ -57,10 +55,6 @@ class _TopologyMetrics:
             'cpu_seconds_allocated': cpu_mean * observed,
             'memory_mb_seconds_allocated': mem_mean * observed,
         }
-
-    def to_json(self, now: float) -> str:
-        """Serializza in JSON lo snapshot topologico."""
-        return json.dumps(self.to_dict(now), ensure_ascii=False, allow_nan=False)
 
 
 class _TopologyMetricsCollector(MetricCollector):

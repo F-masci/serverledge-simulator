@@ -14,9 +14,10 @@ from sim.utils.validation import nonnegative_integer
 
 class StreamKind(IntEnum):
     """Codici persistenti degli scopi PRNG: non rinumerare quando si aggiungono nuovi scopi."""
-    ARRIVAL = 1  # Generazione degli interarrivi delle invocazioni.
-    SERVICE = 2  # Campionamento delle durate di servizio.
-    ROUTING = 3  # Scelte casuali di instradamento e load balancing.
+    ARRIVAL = 1   # Generazione degli interarrivi delle invocazioni.
+    SERVICE = 2   # Campionamento delle durate di servizio.
+    ROUTING = 3   # Scelte casuali di instradamento e load balancing.
+    EVICTION = 4  # Ordine casuale dei pool durante l'eviction per pressione di memoria.
 
 
 class RandomStreams:

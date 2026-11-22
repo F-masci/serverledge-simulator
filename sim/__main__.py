@@ -13,6 +13,7 @@ from .utils.validation import nonnegative_integer
 
 
 def main() -> None:
+    """Punto di ingresso CLI per eseguire uno scenario e stampare il riepilogo."""
 
     ### Parsing ###
     parser = argparse.ArgumentParser(description='Avvia uno scenario di arrivi a eventi discreti')

@@ -5,7 +5,6 @@ Le modifiche sono riservate al nodo, che coordina la contabilità delle risorse.
 
 import json
 from collections.abc import Iterator
-from typing import Callable
 
 from .container import DockerContainer
 from .function import Function
@@ -18,11 +17,6 @@ class ContainerPool:
         self._function = function
         self._busy: list[DockerContainer] = []
         self._idle: list[DockerContainer] = []
-
-        ### Callback ###
-        self.on_added: Callable[[ContainerPool, DockerContainer], None] | None = None
-        self.on_popped: Callable[[DockerContainer], None] | None = None
-        self.on_removed: Callable[[ContainerPool, DockerContainer], None] | None = None
 
     @property
     def function(self) -> Function:
@@ -59,6 +53,10 @@ class ContainerPool:
 
         return None
 
+    def has_reusable_busy(self) -> bool:
+        """Indica se esiste un container busy con slot di concorrenza liberi."""
+        return self._get_reusable_busy() is not None
+
     def _get_reusable_busy(self) -> DockerContainer | None:
         """Restituisce un container già in uso che non abbia raggiunto la concorrenza massima, se disponibile."""
         return next((c for c in self._busy
@@ -69,21 +67,31 @@ class ContainerPool:
         return self._idle[-1] if self._idle else None
 
     def pop_idle(self) -> DockerContainer:
+        """Estrae l'ultimo container idle secondo politica LIFO."""
         return self._idle.pop()
 
     ## Container management ##
 
-    def add(self, container: DockerContainer) -> None:
-        """Registra un container nel pool, in base al suo stato attuale."""
+    def add_busy(self, container: DockerContainer) -> None:
+        """Registra un container nel gruppo busy."""
         self._ensure_function(container)
         self._ensure_duplicate(container)
+        self._busy.append(container)
 
+    def add_idle(self, container: DockerContainer) -> None:
+        """Registra un container nel gruppo idle."""
+        self._ensure_function(container)
+        self._ensure_duplicate(container)
+        self._idle.append(container)
+
+    def add(self, container: DockerContainer) -> None:
+        """Registra un container nel pool, in base al suo stato attuale."""
         if container.is_busy:
-            self._busy.append(container)
+            self.add_busy(container)
             return
 
         if container.is_idle:
-            self._idle.append(container)
+            self.add_idle(container)
             return
 
         raise ValueError('Container non pronto')
@@ -99,15 +107,12 @@ class ContainerPool:
         """Rimuove un container occupato dal pool senza preservare l'ordine."""
         self._swap_remove(self._busy, container)
 
-    def remove_idle(self, container: DockerContainer) -> None:
-        """Rimuove un container idle dal pool senza preservare l'ordine."""
-        self._swap_remove(self._idle, container)
-
-    def remove_expired(self, now: float) -> tuple[DockerContainer, ...]:
-        """Rimuove i container idle scaduti e restituisce quelli rimossi."""
-        expired = tuple(c for c in self._idle if c.is_expired(now))
-        self._idle[:] = [c for c in self._idle if not c.is_expired(now)]
-        return expired
+    def remove_idle(self, container: DockerContainer, *, preserve_order: bool = False) -> None:
+        """Rimuove un container idle dal pool (con compattazione ordinata per il janitor)."""
+        if preserve_order:
+            self._idle.remove(container)
+        else:
+            self._swap_remove(self._idle, container)
 
     ######################
     ### Error handling ###
@@ -120,10 +125,6 @@ class ContainerPool:
     def _ensure_duplicate(self, container: DockerContainer) -> None:
         if container in self:
             raise ValueError('Container già presente nel pool')
-
-    def _ensure_present(self, container: DockerContainer) -> None:
-        if container not in self:
-            raise ValueError('Container non presente nel pool')
 
     #####################
     ### Serialization ###

@@ -207,20 +207,20 @@ class SimulationTest(unittest.TestCase):
         definition = json.loads(source.read_text(encoding='utf-8'))
         with TemporaryDirectory() as directory:
             path = Path(directory) / 'scenario.json'
-            for mode in ('MAB', 'ArchitectureUnaware'):
+            definition['load_balancer'] = 'MAB'
+            path.write_text(json.dumps(definition), encoding='utf-8')
+            scenario = Scenario.load(path)
+            self.assertEqual(scenario.load_balancer, 'MAB')
+            with self.assertRaisesRegex(NotImplementedError, 'MAB'):
+                Simulation(scenario)
+
+            for mode in ('RoundRobin', 'ArchitectureUnaware'):
                 with self.subTest(mode=mode):
                     definition['load_balancer'] = mode
                     path.write_text(json.dumps(definition), encoding='utf-8')
                     scenario = Scenario.load(path)
                     self.assertEqual(scenario.load_balancer, mode)
-                    with self.assertRaisesRegex(NotImplementedError, mode):
-                        Simulation(scenario)
-
-            definition['load_balancer'] = 'RoundRobin'
-            path.write_text(json.dumps(definition), encoding='utf-8')
-            scenario = Scenario.load(path)
-            self.assertEqual(scenario.load_balancer, 'RoundRobin')
-            Simulation(scenario)
+                    Simulation(scenario)
 
             definition['load_balancer'] = 'Other'
             path.write_text(json.dumps(definition), encoding='utf-8')
@@ -229,7 +229,7 @@ class SimulationTest(unittest.TestCase):
 
     def test_simulation_seed_controls_ring_selection(self):
         infrastructure = {'rings': [
-            {'id': name, 'arch': 'amd64', 'memory_mb': 512, 'cpus': 2,
+            {'id': name, 'arch': 'amd64', 'machine_tag': f'amd64/{name}', 'memory_mb': 512, 'cpus': 2,
              'nodes': [{'name': name}]}
             for name in ('first', 'second')
         ]}
@@ -380,8 +380,8 @@ class SimulationTest(unittest.TestCase):
             service = Scenario.load(path).function_registry.get('fixed').sampler.service
             self.assertEqual((service.mean, service.scv), (0.25, 0.5))
 
-    def test_balancer_rejects_at_saturation_even_with_local_queue_enabled(self):
-        """I rifiuti del bilanciatore precedono l'ammissione locale."""
+    def test_balancer_enqueues_at_saturation_when_local_queue_enabled(self):
+        """A saturazione il bilanciatore inoltra alla FIFO del nodo e rifiuta solo a coda piena."""
         definition = {
             'scheduler': {'queue': {'capacity': 1}},
             'functions': [{
@@ -403,20 +403,16 @@ class SimulationTest(unittest.TestCase):
         totals = simulation.metrics_snapshot()['total']
         self.assertEqual(
             (totals['arrivals'], totals['accepted'], totals['waiting'], totals['queued'], totals['rejected']),
-            (3, 1, 0, 0, 2),
+            (3, 1, 1, 1, 1),
         )
-        self.assertEqual(totals['pending'], 1)
+        self.assertEqual(totals['pending'], 2)
         self.advance_to(engine, 2.5)
         totals = simulation.metrics_snapshot()['total']
-        self.assertEqual((totals['accepted'], totals['completed'], totals['pending']), (1, 1, 0))
+        self.assertEqual((totals['accepted'], totals['completed'], totals['waiting'], totals['pending']), (2, 1, 0, 1))
         rejections = [event.to_dict()['data'] for event in notifications
                       if event.type is NotificationType.REQUEST_REJECTED]
         self.assertEqual([(event['reason'], event['node_id']) for event in rejections],
-                         [('out_of_resources', None)] * 2)
-
-        self.advance_to(engine, 3)
-        totals = simulation.metrics_snapshot()['total']
-        self.assertEqual((totals['accepted'], totals['warm_starts']), (2, 1))
+                         [('out_of_resources', None)])
 
     def test_local_queue_metrics_follow_queued_and_accepted_notifications(self):
         function = Function('hello', 128, 1, BuiltinRuntime('python314'), profile=FunctionProfile(
@@ -633,8 +629,10 @@ class SimulationTest(unittest.TestCase):
         notifications = []
         self.addCleanup(observer.subscribe(notifications.append))
         self.assertTrue(first._ctx.engine.step())
-        first_nodes = first.metrics_snapshot()['nodes_by_ring']['edge-x86']
-        second_nodes = second.metrics_snapshot()['nodes_by_ring']['edge-x86']
+        first_rings = first.metrics_snapshot()['nodes_by_ring']
+        second_rings = second.metrics_snapshot()['nodes_by_ring']
+        first_nodes = {**first_rings['edge-x86'], **first_rings['edge-x86-standard']}
+        second_nodes = {**second_rings['edge-x86'], **second_rings['edge-x86-standard']}
         self.assertEqual(set(first_nodes), {'edge-1', 'edge-2'})
         self.assertEqual(sum(node['used_cpus'] for node in first_nodes.values()), 1)
         self.assertEqual(sum(node['used_cpus'] for node in second_nodes.values()), 0)

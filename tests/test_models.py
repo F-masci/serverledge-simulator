@@ -18,7 +18,7 @@ Riferimenti al codice Infrascaler (percorsi relativi al repository):
 import unittest
 
 from sim.model.function import Function
-from sim.model.runtime import BuiltinRuntime, CustomRuntime
+from sim.model.runtime import BuiltinRuntime, CustomRuntime, Runtime
 from sim.model.node import Node
 from sim.model.container import ContainerState
 
@@ -100,19 +100,18 @@ class ModelsTest(unittest.TestCase):
         self.assertIs(self.node.acquire(f), b)
         self.assertIs(self.node.acquire(f), a)
 
-    def test_prewarm_eviction_and_limits(self):
-        """Verifica prewarming, recupero RAM warm e traduzione dei limiti Docker.
+    def test_idle_eviction_and_limits(self):
+        """Verifica recupero RAM warm e traduzione dei limiti Docker.
 
-        Un prewarm da 256 non trattiene CPU. Una nuova funzione da 512 richiede
+        Un container idle da 256 non trattiene CPU. Una nuova funzione da 512 richiede
         tutta la memoria del nodo: il container idle deve essere eliminato.
         La nuova prenotazione occupa tutta la RAM. I limiti Docker derivati sono
         512 x 1048576 byte e 50000 microsecondi di quota per una CPU.
-        Si assume distruzione riuscita; non vengono
-        verificati errori Docker o ordine di eviction fra più candidati.
         """
         f = function(memory=256)
-        a = self.node.prewarm(f)
+        a = self.node.acquire(f)
         self.node.creation_succeeded(a, 0)
+        self.node.complete(a, 1)
         self.assertEqual(self.node.resources.used_cpus, 0)
         b = self.node.acquire(function('g', memory=512))
         self.assertIsNotNone(b)
@@ -120,6 +119,33 @@ class ModelsTest(unittest.TestCase):
         self.assertEqual(self.node.resources.free_memory, 0)
         self.assertEqual(b.memory_limit_bytes, 512 * 1048576)
         self.assertEqual(b.cpu_quota_us, 50000)
+
+    def test_unknown_runtime_and_empty_machine_tag_and_callback_consistency(self):
+        """Verifica rifiuto runtime ignoti, fallback machine_tag vuoto e ordine callback."""
+        with self.assertRaisesRegex(ValueError, 'Runtime sconosciuto'):
+            Runtime.get_runtime('unknown-runtime')
+
+        empty_tag_node = Node('n-empty', 512, 2, 'amd64', '')
+        self.assertEqual(empty_tag_node.id.machine_tag, 'amd64')
+
+        observed = []
+        f = function(concurrency=1)
+        self.node.on_container_created = lambda node, c: observed.append(('created', c in node.pools[f.name].busy))
+        self.node.on_container_idle = lambda node, c: observed.append(('idle', c in node.pools[f.name].idle))
+        self.node.on_container_destroyed = lambda node, c: observed.append(('destroyed', c.node is node))
+
+        c1 = self.node.acquire(f)
+        c2 = self.node.acquire(f)
+        self.node.creation_succeeded(c1, 0)
+        self.node.creation_succeeded(c2, 0)
+        self.node.complete(c1, 1)
+        self.node.complete(c2, 2)
+        # Scade solo c1 a t=601.5: c2 resta nell'ordine originale.
+        self.node.expire(601.5, container=c1)
+        self.assertEqual(self.node.pools[f.name].idle, (c2,))
+        self.assertIn(('created', True), observed)
+        self.assertIn(('idle', True), observed)
+        self.assertIn(('destroyed', True), observed)
 
     def test_pool_supports_length_membership_and_iteration(self):
         """Il pool espone numero e istanze dei container tramite protocolli Python.

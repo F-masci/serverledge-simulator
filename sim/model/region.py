@@ -6,12 +6,14 @@ import json
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
+from sim.random.streams import RandomStreams, StreamKind
 from .infrastructure import Infrastructure
 from .load_balancer import LoadBalancer
 from .node import Node
 from .request import Request
 
 if TYPE_CHECKING:
+    from numpy.random import Generator
     from sim.bindings import NodeBindings
     from sim.io.scenario import Scenario
     from .ring import ArchitectureRing
@@ -142,6 +144,7 @@ class Region:
         assert config is not None
 
         # Crea il load balancer con uno stream PRNG dedicato alla regione.
+        streams = RandomStreams(scenario.seed)
         stream_id = 'load_balancer' if self._name == scenario.primary_region else f'load_balancer/{self._name}'
         load_balancer = LoadBalancer.create(scenario.load_balancer, seed=scenario.seed, stream_id=stream_id)
         infrastructure = Infrastructure(
@@ -155,12 +158,15 @@ class Region:
             self._create_ring(
                 infrastructure, ring.id,
                 arch=ring.arch, memory=ring.memory_mb, cpus=ring.cpus, replicas=ring.replicas,
+                machine_tag=ring.machine_tag,
             )
             for node in ring.nodes:
+                eviction_rng = streams.stream(StreamKind.EVICTION, f'{self._name}/{ring.id}/{node.name}')
                 self._create_node(
                     infrastructure, ring.id, node.name, node.machine_tag,
                     idle_timeout=scenario.containers.idle_timeout,
                     queue_capacity=scenario.scheduler.queue_capacity,
+                    eviction_rng=eviction_rng,
                 )
 
         return infrastructure
@@ -174,10 +180,11 @@ class Region:
         memory: int,
         cpus: float,
         replicas: int,
+        machine_tag: str | None = None,
     ) -> ArchitectureRing:
         """Crea un anello sull'infrastruttura della regione (ereditando i binding configurati)."""
         return infrastructure.create_ring(
-            ring_id, arch=arch, memory=memory, cpus=cpus, replicas=replicas,
+            ring_id, arch=arch, memory=memory, cpus=cpus, replicas=replicas, machine_tag=machine_tag,
         )
 
     @staticmethod
@@ -189,12 +196,14 @@ class Region:
         *,
         idle_timeout: float = 600,
         queue_capacity: int = 0,
+        eviction_rng: 'Generator | None' = None,
     ) -> Node:
         """Crea un nodo nell'anello indicato (applicando i binding al livello dell'anello)."""
         return infrastructure.create_node(
             ring_id, name, machine_tag,
             idle_timeout=idle_timeout,
             queue_capacity=queue_capacity,
+            eviction_rng=eviction_rng,
         )
 
     ## Request management ##
@@ -211,10 +220,15 @@ class Region:
             request.accept_on_region(self)
             return None
 
-        # In assenza di load balancer e di un nodo esplicito si indirizza al primo nodo registrato.
+        # In assenza di load balancer e di un nodo esplicito si indirizza al primo nodo registrato,
+        # verificando architettura e machine_tag.
         if node is None and not self._has_load_balancer:
             node = self.first_registered_node()
-            if node is None:
+            if (
+                node is None
+                or not request.function.supports_arch(node.id.arch)
+                or not request.function.supports_machine_tag(node.id.machine_tag)
+            ):
                 request.reject('no_destination')
                 return None
 

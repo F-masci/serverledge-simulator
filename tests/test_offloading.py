@@ -20,8 +20,9 @@ class OffloadingTest(unittest.TestCase):
         self.function = Function('f', 128, 1, BuiltinRuntime('python314'), supported_archs=('amd64',))
 
     def node(self, name, *, arch='amd64', tag=None, memory=128, cpus=1, queue_capacity=0):
-        self.infrastructure.create_ring(name, arch=arch, memory=memory, cpus=cpus)
-        return self.infrastructure.create_node(name, name, tag, queue_capacity=queue_capacity)
+        ring_tag = tag or f'{arch}/{name}'
+        self.infrastructure.create_ring(name, arch=arch, memory=memory, cpus=cpus, machine_tag=ring_tag)
+        return self.infrastructure.create_node(name, name, ring_tag, queue_capacity=queue_capacity)
 
     def test_default_policy_queues_locally_even_if_offloading_is_allowed(self):
         origin = self.node('origin', queue_capacity=1)
@@ -46,10 +47,21 @@ class OffloadingTest(unittest.TestCase):
         self.assertIs(self.infrastructure.submit(fallback, node=origin), origin)
         self.assertIsNone(fallback.to_dict()['offloaded_from_node_id'])
 
-    def test_edgeonly_local_fallback_does_not_use_the_fifo(self):
-        origin = self.node('origin', queue_capacity=1)
+    def test_edgeonly_does_not_fallback_locally_when_no_neighbors_exist(self):
+        origin = self.node('origin')
         self.infrastructure.configure_scheduler(origin, NodeScheduling(
             SchedulingPolicy.EDGE_ONLY, fallback_local=True,
+        ))
+        request = Request(self.function, can_offload=True)
+        self.assertIsNone(self.infrastructure.submit(request, node=origin))
+        self.assertIs(request.status, RequestStatus.REJECTED)
+        self.assertEqual(origin.resources.used_cpus, 0)
+
+    def test_edgeonly_local_fallback_does_not_use_the_fifo(self):
+        origin = self.node('origin', queue_capacity=1)
+        peer = self.node('arm', arch='arm64')
+        self.infrastructure.configure_scheduler(origin, NodeScheduling(
+            SchedulingPolicy.EDGE_ONLY, fallback_local=True, nearest_neighbors=(peer,),
         ))
 
         active = Request(self.function)
@@ -59,7 +71,7 @@ class OffloadingTest(unittest.TestCase):
         self.assertIs(fallback.status, RequestStatus.REJECTED)
         self.assertIs(fallback.node, origin)
 
-    def test_edgeonly_uses_current_memory_for_each_invocation(self):
+    def test_edgeonly_uses_offloading_cache_and_reevaluates_after_expiration(self):
         origin = self.node('origin', queue_capacity=1)
         small = self.node('small', memory=256)
         large = self.node('large', memory=512, cpus=2)
@@ -74,8 +86,14 @@ class OffloadingTest(unittest.TestCase):
         blocker = Function('blocker', 384, 1, BuiltinRuntime('python314'))
         self.assertIs(self.infrastructure.submit(Request(blocker), node=large, now=21), large)
 
-        second = Request(self.function, can_offload=True)
-        self.assertIs(self.infrastructure.submit(second, node=origin, now=21), small)
+        # Entro i 60s la cache riutilizza 'large' senza ricontrollare la memoria del vicino.
+        cached = Request(self.function, can_offload=True)
+        self.assertIsNone(self.infrastructure.submit(cached, node=origin, now=21))
+        self.assertIs(cached.node, large)
+
+        # Oltre i 60s la cache scade e seleziona 'small' che ha più memoria disponibile.
+        after_expiry = Request(self.function, can_offload=True)
+        self.assertIs(self.infrastructure.submit(after_expiry, node=origin, now=81), small)
         self.assertEqual(origin.resources.used_cpus, 0)
 
     def test_edgeonly_forwards_to_positive_memory_even_if_insufficient(self):

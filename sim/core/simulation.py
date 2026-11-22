@@ -10,13 +10,15 @@ from uuid import uuid4
 from sim.bindings import NodeBindings, RequestBindings
 from sim.io.scenario import Scenario
 from sim.model.container import DockerContainer
-from sim.model.events import ArrivalEvent, CompletionEvent, ContainerCleanupEvent, ContainerReadyEvent, ScheduledEvent
-from sim.model.events.region_delivery_event import RegionDeliveryEvent
+from sim.model.events import (
+    ArrivalEvent, CompletionEvent, ContainerCleanupEvent, ContainerReadyEvent,
+    RegionDeliveryEvent, ResponseEvent, ScheduledEvent,
+)
 from sim.model.node import Node
 from sim.model.offloading import NodeScheduling
 from sim.model.region import Region
 from sim.model.request import Request, RequestStatus
-from sim.observer import FinalStatistics, SimulationError
+from sim.observer import FinalStatistics
 from sim.observer.observer import Observer, observer as shared_observer
 from sim.metrics import SimulationMetrics
 from sim.utils.report import format_metrics
@@ -138,6 +140,7 @@ class Simulation:
                         ),
                         nearest_neighbors=neighbors,
                         remote_region=regions[node_config.remote_region] if node_config.remote_region is not None else None,
+                        offloading_cache_validity_s=scheduler.offloading_cache_validity_s,
                     ))
 
     #############################
@@ -244,7 +247,12 @@ class Simulation:
     def _on_request_state_changed(
         self, request: Request, previous: RequestStatus, current: RequestStatus,
     ) -> None:
-        """Gestisce l'accettazione della richiesta (diretta o estratta dalla FIFO)."""
+        """Gestisce accettazione e ritorno dei rifiuti remoti della richiesta."""
+        if current is RequestStatus.RESPONDING and previous is RequestStatus.CREATED:
+            self._ctx.engine.schedule_after(
+                request.return_delay, ResponseEvent(ctx=self._ctx, request=request),
+            )
+            return
         if current is not RequestStatus.ACCEPTED:
             return
 

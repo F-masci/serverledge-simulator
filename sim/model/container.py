@@ -136,20 +136,16 @@ class DockerContainer:
 
     ## State transitions ##
 
-    def created(self, *, idle: bool, now: float, timeout: float) -> None:
-        """Segna il container come creato, pronto per l'uso."""
+    def created(self) -> None:
+        """Segna il container come creato e pronto per la prima esecuzione."""
         self._ensure_status(ContainerState.CREATING, 'Creazione container')
-        
-        # Imposta il contatore e la scadenza prima di notificare la creazione.
-        state = ContainerState.IDLE if idle else ContainerState.BUSY
-        self._requests_count = 0 if idle else 1
-        self._expiration_time = now + timeout if idle else None
-        self._handle_change_status(state, self.on_created)
 
-        # Dopo la creazione, notifica anche lo stato operativo iniziale.
-        if self.on_idle is not None and self.is_idle:
-            self.on_idle(self)
-        if self.on_busy is not None and self.is_busy:
+        # Imposta il contatore prima di notificare la creazione e lo stato operativo.
+        self._requests_count = 1
+        self._expiration_time = None
+        self._handle_change_status(ContainerState.BUSY, self.on_created)
+
+        if self.on_busy is not None:
             self.on_busy(self)
 
     def acquire(self) -> None:
@@ -175,11 +171,12 @@ class DockerContainer:
             self._handle_change_status(ContainerState.IDLE, self.on_idle)
 
     def destroy(self) -> None:
-        """Segna il container come distrutto."""
+        """Segnala il container come distrutto."""
         self._ensure_statuses((ContainerState.IDLE, ContainerState.CREATING), 'Distruzione ordinaria consentita solo per idle o creazione fallita')
 
-        self._node = None
+        # Notifica prima di scollegare il nodo, così le callback possono ancora accedervi.
         self._handle_change_status(ContainerState.DESTROYED, self.on_destroyed)
+        self._node = None
 
     ## Callback handling ##
 

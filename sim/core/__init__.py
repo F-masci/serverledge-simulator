@@ -2,5 +2,6 @@
 
 from sim.model.events import Event, EventStatus, ScheduledEvent
 from .engine import SimulationEngine
+from .simulation import Simulation, SimulationContext
 
-__all__ = ['SimulationEngine', 'Event', 'EventStatus', 'ScheduledEvent']
+__all__ = ['Simulation', 'SimulationContext', 'SimulationEngine', 'Event', 'EventStatus', 'ScheduledEvent']

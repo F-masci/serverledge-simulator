@@ -8,8 +8,9 @@ from sim.model.function import Function, FunctionProfile
 from sim.model.offloading import SchedulingPolicy
 from sim.model.region import RegionMode
 from sim.model.runtime import Runtime
-from sim.utils.validation import finite_time, integer, nonempty_string, positive_integer, positive_number, \
-    nonnegative_number
+from sim.utils.validation import (
+    nonempty_string, nonnegative_integer, nonnegative_number, positive_integer, positive_number,
+)
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,7 @@ class _SchedulerConfig:
     queue_capacity: int
     policy: SchedulingPolicy
     fallback_local: bool
+    offloading_cache_validity_s: float = 60.0
 
     @classmethod
     def parse(cls, scheduler: object) -> '_SchedulerConfig':
@@ -28,7 +30,7 @@ class _SchedulerConfig:
         if scheduler is None:
             scheduler = {}
 
-        allowed = {'queue', 'policy', 'fallback_local'}
+        allowed = {'queue', 'policy', 'fallback_local', 'offloading_cache_validity_s'}
         if not isinstance(scheduler, Mapping) or scheduler.keys() - allowed:
             raise ValueError(f'Campi scheduler ammessi: {", ".join(sorted(allowed))}')
         queue = scheduler.get('queue', {})
@@ -36,12 +38,16 @@ class _SchedulerConfig:
         # Controlla che 'queue' sia un dizionario e che contenga solo la chiave 'capacity'.
         if not isinstance(queue, Mapping) or queue.keys() - {'capacity'}:
             raise ValueError('scheduler.queue accetta solo capacity')
-        capacity = integer(queue.get('capacity', 0), 'scheduler.queue.capacity')
+        capacity = nonnegative_integer(queue.get('capacity', 0), 'scheduler.queue.capacity')
+        cache_validity = nonnegative_number(
+            scheduler.get('offloading_cache_validity_s', 60.0), 'scheduler.offloading_cache_validity_s',
+        )
 
         return cls(
             queue_capacity=capacity,
             policy=SchedulingPolicy(nonempty_string(scheduler.get('policy', 'default'), 'scheduler.policy')),
             fallback_local=_boolean(scheduler.get('fallback_local', False), 'scheduler.fallback_local'),
+            offloading_cache_validity_s=cache_validity,
         )
 
 
@@ -70,6 +76,7 @@ class _InvocationConfig:
 
     @classmethod
     def parse(cls, invocation: object) -> '_InvocationConfig':
+        """Parse della configurazione di ingresso delle invocazioni."""
         if invocation is None:
             return cls()
         if not isinstance(invocation, Mapping) or invocation.keys() - {
@@ -103,10 +110,8 @@ class _ContainersConfig:
         # - 'startup_times'
         if not isinstance(containers, Mapping) or containers.keys() - {'idle_timeout', 'cleanup_interval', 'startup_times'}:
             raise ValueError('containers accetta solo idle_timeout, cleanup_interval e startup_times')
-        idle_timeout = finite_time(containers.get('idle_timeout', 600.0), 'containers.idle_timeout')
-        idle_timeout = nonnegative_number(idle_timeout, 'containers.idle_timeout')
-        cleanup_interval = finite_time(containers.get('cleanup_interval', 30.0), 'containers.cleanup_interval')
-        cleanup_interval = positive_number(cleanup_interval, 'containers.cleanup_interval')
+        idle_timeout = nonnegative_number(containers.get('idle_timeout', 600.0), 'containers.idle_timeout')
+        cleanup_interval = positive_number(containers.get('cleanup_interval', 30.0), 'containers.cleanup_interval')
 
         # Parse dei tempi di avvio per immagine Docker.
         startup_times = containers.get('startup_times', {})
@@ -115,7 +120,6 @@ class _ContainersConfig:
         image_times = {}
         for image, duration in startup_times.items():
             image = nonempty_string(image, 'containers.startup_times (immagine)')
-            duration = finite_time(duration, f'containers.startup_times.{image}')
             duration = nonnegative_number(duration, f'containers.startup_times.{image}')
             image_times[image] = duration
 
@@ -155,10 +159,11 @@ class _NodeConfig:
 
 @dataclass(frozen=True)
 class _RingConfig:
-    """Capacità comuni e nodi appartenenti a un anello omogeneo."""
+    """Capacità comuni, machine_tag e nodi appartenenti a un anello omogeneo."""
 
     id: str
     arch: str
+    machine_tag: str
     memory_mb: int
     cpus: float
     replicas: int
@@ -168,14 +173,21 @@ class _RingConfig:
     def parse(cls, data: object) -> '_RingConfig':
         """Parse della configurazione di un ring."""
 
-        # Controlla le chiavi obbligatorie e il numero opzionale di repliche.
+        # Controlla le chiavi obbligatorie e i campi opzionali.
         required = {'id', 'arch', 'memory_mb', 'cpus', 'nodes'}
-        optional = {'replicas'}
+        optional = {'replicas', 'machine_tag'}
         if not isinstance(data, Mapping) or required - data.keys() or data.keys() - required - optional:
-            raise ValueError('Ogni ring richiede id, arch, memory_mb, cpus e nodes; replicas è opzionale')
+            raise ValueError('Ogni ring richiede id, arch, memory_mb, cpus e nodes; machine_tag e replicas sono opzionali')
 
-        # Legge i nodi dichiarati nel ring e verifica che i nomi siano distinti.
+        # Valida architettura, machine_tag e risorse condivise da tutti i nodi del ring.
         ring_id = nonempty_string(data['id'], 'ring.id')
+        arch = nonempty_string(data['arch'], 'ring.arch')
+        ring_tag = nonempty_string(data['machine_tag'], 'ring.machine_tag') if 'machine_tag' in data else arch
+        memory_mb = positive_integer(data['memory_mb'], 'ring.memory_mb')
+        cpus = positive_number(data['cpus'], 'ring.cpus')
+        replicas = positive_integer(data.get('replicas', 128), 'ring.replicas')
+
+        # Legge i nodi dichiarati nel ring e verifica unicità dei nomi e coerenza del machine_tag.
         definitions = data['nodes']
         if not isinstance(definitions, list):
             raise ValueError(f'I nodi del ring {ring_id} devono essere una lista')
@@ -185,17 +197,14 @@ class _RingConfig:
             node = _NodeConfig.parse(definition)
             if node.name in nodes:
                 raise ValueError(f'Nodo già definito nel ring {ring_id}: {node.name}')
+            if node.machine_tag is not None and node.machine_tag != ring_tag:
+                raise ValueError(
+                    f"machine_tag del nodo {node.name} ({node.machine_tag}) incompatibile con il ring {ring_id} ({ring_tag})"
+                )
             nodes[node.name] = node
 
-        # Valida le risorse condivise da tutti i nodi e le repliche virtuali.
-        arch = nonempty_string(data['arch'], 'ring.arch')
-        memory_mb = positive_integer(data['memory_mb'], 'ring.memory_mb')
-        cpus = finite_time(data['cpus'], 'ring.cpus')
-        cpus = positive_number(cpus, 'ring.cpus')
-        replicas = positive_integer(data.get('replicas', 128), 'ring.replicas')
-
         # Restituisce un'istanza di _RingConfig con i parametri validati.
-        return cls(ring_id, arch, memory_mb, cpus, replicas, tuple(nodes.values()))
+        return cls(ring_id, arch, ring_tag, memory_mb, cpus, replicas, tuple(nodes.values()))
 
 
 @dataclass(frozen=True)
@@ -219,12 +228,16 @@ class _InfrastructureConfig:
         if not isinstance(definitions, list):
             raise ValueError('infrastructure.rings deve essere una lista')
 
-        # L'ordine dichiarato è significativo per il fallback tra ring.
+        # L'ordine dichiarato è significativo per il fallback tra ring; ogni machine_tag ha un solo ring.
         rings: dict[str, _RingConfig] = {}
+        seen_tags: set[str] = set()
         for definition in definitions:
             ring = _RingConfig.parse(definition)
             if ring.id in rings:
                 raise ValueError(f'Ring già definito: {ring.id}')
+            if ring.machine_tag in seen_tags:
+                raise ValueError(f'Ring duplicato per il machine_tag: {ring.machine_tag}')
+            seen_tags.add(ring.machine_tag)
             rings[ring.id] = ring
         # Restituisce i ring validati nell'ordine dichiarato.
         return cls(tuple(rings.values()))
@@ -351,7 +364,7 @@ class _FunctionConfig:
         # Valida l'identità, le risorse e il limite di concorrenza.
         name = nonempty_string(data['name'], 'name')
         memory_mb = positive_integer(data['memory_mb'], 'memory_mb')
-        cpu_demand = finite_time(data['cpu_demand'], 'cpu_demand')
+        cpu_demand = positive_number(data['cpu_demand'], 'cpu_demand')
         max_concurrency = positive_integer(data.get('max_concurrency', 1), 'max_concurrency')
 
         # Costruisce il profilo temporale con le distribuzioni di default.

@@ -245,10 +245,9 @@ class Request:
 
     def accept_on_region(self, region: Region) -> None:
         """Ammette una nuova richiesta su un'infrastruttura di regione."""
-        self.ensure_admissible()
+        self.ensure_created()
 
         # Conserva la regione che gestirà la richiesta.
-        self.ensure_created()
         self._region = region
         self._service_duration = region.service_time_s
         self._handle_change_status(RequestStatus.ACCEPTED, self.on_accepted)
@@ -260,6 +259,9 @@ class Request:
         # Conserva il nodo che ha rifiutato la richiesta, se noto.
         self._node = node
         self._rejection_reason = reason
+        if self._return_delay > 0 and self.on_state_changed is not None:
+            self._handle_change_status(RequestStatus.RESPONDING, None)
+            return
         self._handle_change_status(RequestStatus.REJECTED, self.on_rejected)
 
     def complete(self, now: float) -> None:
@@ -276,6 +278,11 @@ class Request:
         """Conclude un'invocazione con risposta in transito."""
         self.ensure_responding()
         self._handle_change_status(RequestStatus.COMPLETED, self.on_completed)
+
+    def finish_rejection(self) -> None:
+        """Conclude un rifiuto remoto dopo il ritardo di ritorno."""
+        self.ensure_responding()
+        self._handle_change_status(RequestStatus.REJECTED, self.on_rejected)
 
     def _release_execution(self, now: float) -> None:
         """Rilascia le risorse di esecuzione della richiesta."""
