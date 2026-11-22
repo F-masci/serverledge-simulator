@@ -312,6 +312,7 @@ class Simulation:
         """
         queue_wait = self.now - request.region_arrival_time
         self._ctx.observer.notify_request_dequeued(request)
+        self._ctx.observer.notify_request_accepted(request, queue_wait_s=queue_wait)
         self._schedule_execution(request)
 
 

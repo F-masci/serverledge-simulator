@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
 
-from model.request import Request
+from ..request import Request
 
 if TYPE_CHECKING:
     from sim.core.simulation import SimulationContext

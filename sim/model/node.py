@@ -153,7 +153,7 @@ class Node:
         self.on_container_created: Callable[[Node, DockerContainer], None] | None = None
         self.on_container_acquired: Callable[[Node, DockerContainer], None] | None = None
         self.on_container_destroyed: Callable[[Node, DockerContainer], None] | None = None
-        self.on_container_state_changed: Callable[[Node, DockerContainer, ContainerState, ContainerState], None] | None = None
+        self.on_container_state_changed: Callable[[Node, DockerContainer, ContainerState | None, ContainerState], None] | None = None
 
         self.on_container_idle: Callable[[Node, DockerContainer], None] | None = None
         self.on_container_busy: Callable[[Node, DockerContainer], None] | None = None
@@ -354,10 +354,11 @@ class Node:
             if self.resources.available_cpus < function.cpu_demand:
                 return None
 
-            # Si riattiva il container idle e si aggiornano le prenotazioni.
+            # Si riattiva il container idle e si aggiornano le prenotazioni
+            # prima della transizione affinché le callback osservino le risorse aggiornate.
             container = pool.pop_idle()
-            container.acquire()
             self.resources.activate(function)
+            container.acquire()
             pool.add(container)
 
             return container
@@ -393,6 +394,8 @@ class Node:
         container = DockerContainer(f'{self.id.key}/c{next(self._container_ids)}', function, node=self)
         self._bind_container_callbacks(container)
         self._pending[container] = idle
+        if self.on_container_state_changed is not None:
+            self.on_container_state_changed(self, container, None, container.state)
         return container
 
     def _free_memory(self, to_free: int) -> int:
@@ -443,17 +446,20 @@ class Node:
         if pool is None or container not in pool.busy:
             raise ValueError('Container non attivo su questo nodo')
 
+        # Se questa è l'ultima richiesta attiva, si aggiornano pool e prenotazioni
+        # prima della transizione a IDLE affinché le callback osservino le risorse aggiornate.
+        if container.requests_count == 1:
+            pool.remove_busy(container)
+            self.resources.deactivate(container.function)
+
         # Segna il completamento della richiesta e aggiorna lo stato del container.
         container.complete(now, self._idle_timeout)
 
-        # Se il container è tornato idle, lo si sposta dal pool busy
-        # al pool idle e si aggiornano le prenotazioni.
+        # Se il container è tornato idle, lo si registra nel pool idle.
         #
         # TODO: spostare la logica di inversione della lista nell callback on_idle del container
         if container.is_idle:
-            pool.remove_busy(container)
             pool.add(container)
-            self.resources.deactivate(container.function)
 
         # Dopo il completamento, si tenta di ammettere le richieste in attesa nella coda FIFO.
         self.dispatch_waiting()
@@ -472,9 +478,9 @@ class Node:
     def _destroy_idle(self, container: DockerContainer) -> None:
         """Rimuove un container idle dal pool e aggiorna le prenotazioni."""
         pool = self._get_pool(container.function)
-        container.destroy()
         pool.remove_idle(container)
         self.resources.release(container.function, idle=True)
+        container.destroy()
 
     ## Callback handling ##
 
