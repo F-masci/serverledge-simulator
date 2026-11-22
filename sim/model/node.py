@@ -14,7 +14,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from sim.utils.validation import integer, nonnegative_number
-from .container import DockerContainer
+from .container import DockerContainer, ContainerState
 from .function import Function
 from .offloading import NodeScheduling, OffloadingScheduler
 from .pool import ContainerPool
@@ -153,6 +153,10 @@ class Node:
         self.on_container_created: Callable[[Node, DockerContainer], None] | None = None
         self.on_container_acquired: Callable[[Node, DockerContainer], None] | None = None
         self.on_container_destroyed: Callable[[Node, DockerContainer], None] | None = None
+        self.on_container_state_changed: Callable[[Node, DockerContainer, ContainerState, ContainerState], None] | None = None
+
+        self.on_container_idle: Callable[[Node, DockerContainer], None] | None = None
+        self.on_container_busy: Callable[[Node, DockerContainer], None] | None = None
 
         self.on_request_submitted: Callable[[Node, Request], None] | None = None
         self.on_request_dequeued: Callable[[Node, Request], None] | None = None
@@ -479,6 +483,10 @@ class Node:
         on_created = self.on_container_created
         on_acquire = self.on_container_acquired
         on_destroyed = self.on_container_destroyed
+        on_container_state_changed = self.on_container_state_changed
+
+        on_idle = self.on_container_idle
+        on_busy = self.on_container_busy
 
         if on_created is not None:
             container.on_created = partial(on_created, self)
@@ -486,6 +494,13 @@ class Node:
             container.on_acquire = partial(on_acquire, self)
         if on_destroyed is not None:
             container.on_destroyed = partial(on_destroyed, self)
+        if on_container_state_changed is not None:
+            container.on_state_changed = partial(on_container_state_changed, self)
+
+        if on_idle is not None:
+            container.on_idle = partial(on_idle, self)
+        if on_busy is not None:
+            container.on_busy = partial(on_busy, self)
 
     #####################
     ### Serialization ###

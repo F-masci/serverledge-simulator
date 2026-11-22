@@ -253,12 +253,6 @@ class Simulation:
         self._ctx.engine.schedule_after(delay, delivery_event)
         return None
 
-    def _bind_node_callbacks(self, node: Node, region: str, ring_id: str) -> None:
-        """Associa le callback per gli eventi dei nodi."""
-        node.on_container_state_change = partial(self._ctx.observer.notify_container_state, region, ring_id)
-        node.on_container_idle = self._schedule_container_cleanup
-        node.on_request_dequeued = self._request_dequeued
-
     def _final_statistics(self) -> FinalStatistics:
         """Prepara la notifica dopo il completamento di run()."""
         metrics = self.metrics_snapshot()
@@ -271,9 +265,24 @@ class Simulation:
         )
 
 
+    def metrics_snapshot(self) -> dict:
+        """Raccoglie le metriche della replica al tempo corrente."""
+        return self._ctx.metrics.snapshot(self.now, self.regions, self._ctx.scenario.primary_region)
+
+    ################
+    ### Callback ###
+    ################
+
+    ## Handlers ##
 
     def _schedule_execution(self, request: Request) -> None:
-        """Pianifica il servizio nella regione di destinazione."""
+        """
+        Pianifica il servizio nella regione di destinazione.
+        Se la richiesta è "warm", pianifica un CompletionEvent dopo la durata di servizio.
+        Se la richiesta è "cold", pianifica un ContainerReadyEvent dopo il tempo di cold start della funzione.
+
+        Callback invocata quando una richiesta viene accettata da un nodo.
+        """
         if request.warm or request.node is None:
             duration = request.service_duration
             if duration is None:
@@ -296,26 +305,22 @@ class Simulation:
             self._ctx.engine.schedule_after(cold_start_time, container_ready_event)
 
     def _request_dequeued(self, node: Node, request: Request) -> None:
-        """Notifica l'ammissione della richiesta uscita dalla FIFO."""
+        """
+        Notifica l'estrazione dalla coda FIFO del nodo e pianifica l'esecuzione.
+
+        Callback invocata dal nodo quando una richiesta viene estratta dalla coda FIFO.
+        """
         queue_wait = self.now - request.region_arrival_time
         self._ctx.observer.notify_request_dequeued(request)
-        self._ctx.observer.notify_request_accepted(request, queue_wait_s=queue_wait)
         self._schedule_execution(request)
 
 
-
-
-    def notify_event_error(self, event: ScheduledEvent, error: Exception) -> None:
-        """Pubblica il fallimento di un'occorrenza per questa replica."""
-        self._ctx.observer.notify(SimulationError(
-            run_id=self.run_id,
-            sim_time_s=self.now,
-            failed_event=type(event.event).__name__,
-            exception=error,
-        ))
-
     def _schedule_container_cleanup(self, node: Node, container: DockerContainer) -> None:
-        """Pianifica il primo passaggio del janitor strettamente dopo la scadenza."""
+        """
+        Pianifica il primo passaggio del janitor strettamente dopo la scadenza.
+
+        Callback invocata dal nodo quando un container entra nello stato idle.
+        """
         expiration = container.expiration_time
         assert expiration is not None  # Il nodo notifica solo container in idle.
         interval = self._ctx.scenario.containers.cleanup_interval
@@ -328,9 +333,13 @@ class Simulation:
             raise ValueError('Intervallo di pulizia troppo piccolo per avanzare il tempo')
         self._ctx.engine.schedule(check_time, ContainerCleanupEvent(node, container, ctx=self._ctx))
 
-    def metrics_snapshot(self) -> dict:
-        """Raccoglie le metriche della replica al tempo corrente."""
-        return self._ctx.metrics.snapshot(self.now, self.regions, self._ctx.scenario.primary_region)
+    ## Binding ##
+
+    def _bind_node_callbacks(self, node: Node, region: str, ring_id: str) -> None:
+        """Associa le callback per gli eventi dei nodi."""
+        node.on_container_state_changed = partial(self._ctx.observer.notify_container_state, region, ring_id)
+        node.on_container_idle = self._schedule_container_cleanup
+        node.on_request_dequeued = self._request_dequeued
 
     #############################
     ### Notification handlers ###

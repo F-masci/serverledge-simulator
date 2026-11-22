@@ -16,4 +16,5 @@ class ContainerCleanupEvent(Event):
     container: 'DockerContainer'
 
     def execute(self) -> None:
+        """Segnala al nodo di rimuovere il container idle."""
         self.node.expire(self.ctx.engine.now, container=self.container)

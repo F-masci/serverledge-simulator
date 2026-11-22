@@ -149,7 +149,7 @@ class Observer:
         ))
 
     def notify_container_state(
-        self, region: str, ring_id: str, node: Node, container: DockerContainer, previous: ContainerState | None,
+        self, region: str, ring_id: str, node: Node, container: DockerContainer, previous: ContainerState | None, current: ContainerState
     ) -> None:
         """Pubblica la transizione e le prenotazioni risultanti."""
         ctx = self._ensure_context()
