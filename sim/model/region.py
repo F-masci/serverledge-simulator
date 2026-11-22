@@ -1,6 +1,6 @@
 """Ingresso geografico delle invocazioni e gestione della topologia regionale."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from enum import StrEnum
 import json
 from types import MappingProxyType
@@ -38,7 +38,6 @@ class Region:
         name: str,
         *,
         scenario: 'Scenario | None' = None,
-        forward_region: Callable[[Request, 'Region', Node], Node | None] | None = None,
         node_bindings: 'NodeBindings | None' = None,
     ) -> None:
         # Identificativo univoco della regione
@@ -61,7 +60,7 @@ class Region:
             self._has_load_balancer = config.has_load_balancer
             if config.infrastructure is not None:
                 self._infrastructure = self._build_infrastructure(
-                    scenario, forward_region=forward_region, node_bindings=node_bindings,
+                    scenario, node_bindings=node_bindings,
                 )
 
     ### Identification ###
@@ -136,7 +135,6 @@ class Region:
         self,
         scenario: 'Scenario',
         *,
-        forward_region: Callable[[Request, 'Region', Node], Node | None] | None = None,
         node_bindings: 'NodeBindings | None' = None,
     ) -> Infrastructure:
         """Costruisce load balancer, anelli e nodi della regione a partire dallo scenario."""
@@ -148,7 +146,6 @@ class Region:
         load_balancer = LoadBalancer.create(scenario.load_balancer, seed=scenario.seed, stream_id=stream_id)
         infrastructure = Infrastructure(
             load_balancer,
-            forward_region=forward_region,
             region=self,
             node_bindings=node_bindings,
         )

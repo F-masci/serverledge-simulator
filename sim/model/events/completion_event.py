@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 from .event import Event
-from ..request import Request, RequestStatus
+from ..request import Request
 
 
 @dataclass(frozen=True)
@@ -25,8 +25,8 @@ class CompletionEvent(Event):
             return
 
         # Se la richiesta non ha un ritardo di ritorno, completa immediatamente la richiesta.
+        # La notifica di completamento viene invocata dalla callback on_completed della richiesta.
         request.complete(now)
-        self.ctx.observer.notify_request_completed(request)
 
 
 @dataclass(frozen=True)
@@ -39,6 +39,5 @@ class ResponseEvent(Event):
         if not request.is_responding:
             raise ValueError('La richiesta non ha una risposta in transito')
 
-        # Completa la risposta della richiesta e notifica l'osservatore.
+        # Completa la risposta della richiesta; on_completed notifica l'osservatore.
         request.finish_response()
-        self.ctx.observer.notify_request_completed(request)

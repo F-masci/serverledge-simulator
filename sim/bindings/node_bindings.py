@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from sim.model.container import ContainerState, DockerContainer
     from sim.model.node import Node
+    from sim.model.region import Region
     from sim.model.request import Request
 
 
@@ -43,6 +44,7 @@ class NodeBindings:
 
     on_request_submitted: Callable[[Node, Request], None] | None = None
     on_request_dequeued: Callable[[Node, Request], None] | None = None
+    on_request_forwarded: Callable[[Node, Request, Region, Node | None], Node | None] | None = None
 
     ###############
     ### Binding ###
@@ -74,6 +76,8 @@ class NodeBindings:
             node.on_request_submitted = self.on_request_submitted
         if self.on_request_dequeued is not None:
             node.on_request_dequeued = self.on_request_dequeued
+        if self.on_request_forwarded is not None:
+            node.on_request_forwarded = self.on_request_forwarded
 
         # Notifica la registrazione del nodo dopo aver collegato le sue callback.
         if self.on_node_registered is not None:

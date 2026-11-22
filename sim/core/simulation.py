@@ -7,7 +7,7 @@ from math import floor
 from types import MappingProxyType
 from uuid import uuid4
 
-from sim.bindings import NodeBindings
+from sim.bindings import NodeBindings, RequestBindings
 from sim.io.scenario import Scenario
 from sim.model.container import DockerContainer
 from sim.model.events import ArrivalEvent, CompletionEvent, ContainerCleanupEvent, ContainerReadyEvent, ScheduledEvent
@@ -108,11 +108,7 @@ class Simulation:
         """Costruisce tutte le regioni dello scenario con i binding dei nodi e configura gli scheduler."""
         node_bindings = self._build_node_bindings()
         regions = {
-            name: Region(
-                name, scenario=scenario,
-                forward_region=self._forward_region,
-                node_bindings=node_bindings,
-            )
+            name: Region(name, scenario=scenario, node_bindings=node_bindings)
             for name in scenario.regions
         }
         self._configure_schedulers(scenario, regions)
@@ -170,6 +166,7 @@ class Simulation:
             raise RuntimeError('Simulazione già avviata')
 
         # Pianifica il primo arrivo per ogni funzione registrata nello scenario.
+        request_bindings = self._build_request_bindings()
         first_arrivals = []
         for function in self._ctx.scenario.function_registry.values():
             # La funzione deve avere un campionatore per generare arrivi e durate di servizio.
@@ -180,41 +177,18 @@ class Simulation:
             function = replace(function, sampler=deepcopy(function.sampler))
 
             # Pianifica l'arrivo iniziale al tempo specificato nel profilo della funzione.
-            event = ArrivalEvent(ctx=self._ctx, function=function,
-                entry_region=self._entry_region, entry_node=self._entry_node,
-                on_request_submitted=self._notify_request_submission,
-                on_request_accepted=self._schedule_execution
+            event = ArrivalEvent(
+                ctx=self._ctx,
+                function=function,
+                entry_region=self._entry_region,
+                entry_node=self._entry_node,
+                request_bindings=request_bindings,
             )
             scheduled_event = self._ctx.engine.schedule(profile.first_arrival_time, event)
             first_arrivals.append(scheduled_event)
 
         self._started = True
         return tuple(first_arrivals)
-
-    def _forward_region(self, request: Request, destination: Region, source_node: Node) -> Node | None:
-        source = request.region
-        assert source is not None
-        target = None
-        if destination.infrastructure is not None and not destination.has_load_balancer:
-            target = destination.first_registered_node()
-            if target is None or not request.function.supports_arch(target.id.arch):
-                request.reject('out_of_resources', node=source_node)
-                return None
-        request.mark_offloaded(source_node)
-        delay = destination.offload_latency_from(source.name) / 2
-        request.start_transfer(destination, delay)
-        self._ctx.observer.notify_request_forwarded(request, source.name)
-        if delay == 0:
-            self._ctx.observer.notify_request_delivered(request)
-            return destination.submit(request, now=self.now, node=target)
-
-        delivery_event = RegionDeliveryEvent(
-            ctx=self._ctx, request=request, region=destination, node=target,
-            on_request_submitted = self._notify_request_submission,
-            on_request_accepted = self._schedule_execution,
-        )
-        self._ctx.engine.schedule_after(delay, delivery_event)
-        return None
 
     def _final_statistics(self) -> FinalStatistics:
         """Prepara la notifica dopo il completamento di run()."""
@@ -267,16 +241,25 @@ class Simulation:
             container_ready_event = ContainerReadyEvent(ctx=self._ctx, request=request)
             self._ctx.engine.schedule_after(cold_start_time, container_ready_event)
 
-    def _request_dequeued(self, node: Node, request: Request) -> None:
-        """
-        Notifica l'estrazione dalla coda FIFO del nodo e pianifica l'esecuzione.
+    def _on_request_state_changed(
+        self, request: Request, previous: RequestStatus, current: RequestStatus,
+    ) -> None:
+        """Gestisce l'accettazione della richiesta (diretta o estratta dalla FIFO)."""
+        if not current is not RequestStatus.ACCEPTED:
+            return
 
-        Callback invocata dal nodo quando una richiesta viene estratta dalla coda FIFO.
-        """
-        queue_wait = self.now - request.region_arrival_time
-        self._ctx.observer.notify_request_dequeued(request)
+        # Calcola il tempo di attesa in coda solo se la richiesta proviene dalla FIFO.
+        queue_wait = self.now - request.region_arrival_time if previous is RequestStatus.QUEUED else None
         self._ctx.observer.notify_request_accepted(request, queue_wait_s=queue_wait)
         self._schedule_execution(request)
+
+    def _request_dequeued(self, node: Node, request: Request) -> None:
+        """
+        Notifica l'estrazione dalla coda FIFO del nodo.
+
+        Callback invocata dal nodo prima dell'ammissione della richiesta sul container.
+        """
+        self._ctx.observer.notify_request_dequeued(request)
 
 
     def _schedule_container_cleanup(self, node: Node, container: DockerContainer) -> None:
@@ -297,6 +280,32 @@ class Simulation:
             raise ValueError('Intervallo di pulizia troppo piccolo per avanzare il tempo')
         self._ctx.engine.schedule(check_time, ContainerCleanupEvent(node, container, ctx=self._ctx))
 
+    def _schedule_region_delivery(
+        self, node: Node, request: Request, destination: Region, target: Node | None,
+    ) -> Node | None:
+        """
+        Notifica l'inoltro verso la regione remota e pianifica la consegna.
+
+        Se la latenza di sola andata è nulla consegna immediatamente la richiesta
+        alla regione di destinazione; altrimenti pianifica un RegionDeliveryEvent.
+
+        Callback invocata dal nodo al termine di _forward_region.
+        """
+        delay = request.return_delay
+        self._ctx.observer.notify_request_forwarded(request, node.region.name)
+
+        # Con latenza nulla la consegna avviene immediatamente nello stesso istante simulato.
+        if delay == 0:
+            self._ctx.observer.notify_request_delivered(request)
+            return destination.submit(request, now=self.now, node=target)
+
+        # Con latenza positiva pianifica l'evento di consegna alla regione remota.
+        delivery_event = RegionDeliveryEvent(
+            ctx=self._ctx, request=request, region=destination, node=target,
+        )
+        self._ctx.engine.schedule_after(delay, delivery_event)
+        return None
+
     ## Binding ##
 
     def _build_node_bindings(self) -> NodeBindings:
@@ -306,18 +315,14 @@ class Simulation:
             on_container_state_changed=self._ctx.observer.notify_container_state,
             on_container_idle=self._schedule_container_cleanup,
             on_request_dequeued=self._request_dequeued,
+            on_request_forwarded=self._schedule_region_delivery,
         )
 
-    #############################
-    ### Notification handlers ###
-    #############################
-
-    def _notify_request_submission(self, request: Request) -> None:
-        """Notifica l'esito della submission nella regione di ingresso."""
-        observer = self._ctx.observer
-        if request.status is RequestStatus.ACCEPTED:
-            observer.notify_request_accepted(request)
-        elif request.status is RequestStatus.REJECTED:
-            observer.notify_request_rejected(request)
-        elif request.status is RequestStatus.QUEUED:
-            observer.notify_request_queued(request)
+    def _build_request_bindings(self) -> RequestBindings:
+        """Costruisce i binding di ciclo di vita applicati a ogni richiesta creata."""
+        return RequestBindings(
+            on_queued=self._ctx.observer.notify_request_queued,
+            on_rejected=self._ctx.observer.notify_request_rejected,
+            on_completed=self._ctx.observer.notify_request_completed,
+            on_state_changed=self._on_request_state_changed,
+        )

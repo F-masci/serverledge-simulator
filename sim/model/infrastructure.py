@@ -22,14 +22,12 @@ class Infrastructure:
 
     def __init__(
         self, load_balancer: LoadBalancer | None = None, *,
-        forward_region: Callable[[Request, 'Region', Node], Node | None] | None = None,
         region: 'Region | None' = None,
         node_bindings: 'NodeBindings | None' = None,
     ) -> None:
         self._rings: dict[str, ArchitectureRing] = {}
         self._region = region
         self._load_balancer = RandomLoadBalancer() if load_balancer is None else load_balancer
-        self._forward_region = forward_region
         self._node_bindings = node_bindings
 
         ### Callback ###
@@ -150,16 +148,10 @@ class Infrastructure:
             return None
         return node.receive(request)
 
-    def forward(self, request: Request, target: 'Node | Region', *, source: Node) -> Node | None:
-        """Consegna l'invocazione al destinatario scelto dalla policy del nodo."""
-        if isinstance(target, Node):
-            request.mark_offloaded(source)
-            return self._submit_to_node(request, target)
-
-        if self._forward_region is None:
-            request.reject('no_destination')
-            return None
-        return self._forward_region(request, target, source)
+    def forward(self, request: Request, target: Node, *, source: Node) -> Node | None:
+        """Consegna l'invocazione al nodo vicino scelto dalla policy di offloading."""
+        request.mark_offloaded(source)
+        return self._submit_to_node(request, target)
 
     #####################
     ### Serialization ###

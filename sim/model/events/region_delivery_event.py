@@ -2,14 +2,14 @@
 
 from dataclasses import dataclass
 
-from .event import RequestEvent
+from .event import Event
 from ..node import Node
 from ..region import Region
 from ..request import Request
 
 
 @dataclass(frozen=True)
-class RegionDeliveryEvent(RequestEvent):
+class RegionDeliveryEvent(Event):
     request: Request
     region: Region
     node: Node | None = None
@@ -21,6 +21,5 @@ class RegionDeliveryEvent(RequestEvent):
         # Notifica l'osservatore della consegna della richiesta alla regione di destinazione.
         self.ctx.observer.notify_request_delivered(self.request)
 
-        # Inoltra la richiesta alla regione di destinazione.
+        # Inoltra la richiesta alla regione di destinazione (le callback sono già legate alla richiesta).
         self.region.submit(self.request, now=now, node=self.node)
-        self._handle_callback(self.request)

@@ -160,6 +160,7 @@ class Node:
 
         self.on_request_submitted: Callable[[Node, Request], None] | None = None
         self.on_request_dequeued: Callable[[Node, Request], None] | None = None
+        self.on_request_forwarded: Callable[[Node, Request, Region, Node | None], Node | None] | None = None
 
     ### Identification ###
 
@@ -254,14 +255,48 @@ class Node:
         # altrimenti rifiuta la richiesta.
         target: Node | Region | None = self._scheduler.schedule(request, self)
 
-        # Se lo scheduler ha scelto un target, si inoltra la richiesta al target selezionato.
-        if target is not None:
+        # Se lo scheduler ha scelto un target, si inoltra la richiesta:
+        # - verso un altro nodo della stessa regione tramite l'infrastruttura;
+        # - verso una regione remota tramite _forward_region.
+        if isinstance(target, Node):
             return self.infrastructure.forward(request, target, source=self)
+        if target is not None:
+            return self._forward_region(request, target)
 
         # Se lo scheduler non ha scelto un target, si verifica lo stato della richiesta
         # a seguito della submit locale. Se la richiesta è stata accettata o messa in coda,
         if request.is_accepted or request.is_queued:
             return self
+
+        return None
+
+    def _forward_region(self, request: Request, destination: Region) -> Node | None:
+        """Avvia l'offloading della richiesta verso una regione remota.
+
+        Verifica l'eventuale nodo destinatario in assenza di load balancer,
+        aggiorna lo stato di trasferimento della richiesta e invoca la callback
+        on_request_forwarded per la consegna o la pianificazione dell'evento.
+        """
+        source = request.region
+        assert source is not None
+
+        # Se la regione remota è simulata ma priva di load balancer, verifica subito
+        # la presenza e la compatibilità del primo nodo registrato.
+        target: Node | None = None
+        if destination.infrastructure is not None and not destination.has_load_balancer:
+            target = destination.first_registered_node()
+            if target is None or not request.function.supports_arch(target.id.arch):
+                request.reject('out_of_resources', node=self)
+                return None
+
+        # Marca l'offloading e avvia il trasferimento con latenza di sola andata.
+        request.mark_offloaded(self)
+        delay = destination.offload_latency_from(source.name) / 2
+        request.start_transfer(destination, delay)
+
+        # Delega alla callback registrata la notifica e la consegna/schedulazione.
+        if self.on_request_forwarded is not None:
+            return self.on_request_forwarded(self, request, destination, target)
 
         return None
 
@@ -319,11 +354,12 @@ class Node:
             if container is None:
                 break
 
-            # Se la richiesta può essere ammesse, si rimuove dalla coda e si notifica l'ammissione.
+            # Rimuove la richiesta dalla coda, notifica l'estrazione e poi la ammette sul container
+            # affinché RequestDequeued preceda sempre RequestAccepted.
             request = self._queue.popleft()
-            request.accept_on_container(container)
             if self.on_request_dequeued is not None:
                 self.on_request_dequeued(self, request)
+            request.accept_on_container(container)
 
     ## Container management ##
 
