@@ -1,4 +1,4 @@
-"""Formattazione del report finale per il terminale."""
+"""Formattazione del report finale della simulazione per il terminale."""
 
 from collections.abc import Iterable
 from pathlib import Path
@@ -8,17 +8,24 @@ if TYPE_CHECKING:
     from ..observer import FinalStatistics
 
 
+##########################
+### Formatting helpers ###
+##########################
+
 def _seconds(value: float | None) -> str:
+    """Formatta una durata in secondi o 'n.d.' se non disponibile."""
     return 'n.d.' if value is None else f'{value:.6g} s'
 
 
 def _section(title: str, rows: Iterable[tuple[str, object]]) -> str:
+    """Formatta una sezione chiave-valore allineata per etichetta."""
     fields = tuple(rows)
     width = max(len(label) for label, _ in fields)
     return '\n'.join([title, *(f'  {label:<{width}}  {value}' for label, value in fields)])
 
 
 def _table(title: str, headers: tuple[str, ...], rows: Iterable[tuple[object, ...]]) -> str:
+    """Formatta una tabella testuale allineando a destra le colonne puramente numeriche."""
     cells = [headers, *(tuple(map(str, row)) for row in rows)]
     columns = tuple(zip(*cells, strict=True))
     widths = [max(map(len, column)) for column in columns]
@@ -35,10 +42,16 @@ def _table(title: str, headers: tuple[str, ...], rows: Iterable[tuple[object, ..
     ])
 
 
+#######################
+### Report builders ###
+#######################
+
 def format_metrics(metrics: dict) -> str:
     """Organizza lo snapshot in sezioni leggibili senza ricalcolare le metriche."""
     total = metrics['total']
     containers = total['containers']
+
+    # Sezioni principali: riepilogo invocazioni, tempi medi e stato dei container.
     sections = [
         _section('Invocazioni', (
             ('Arrivi', total['arrivals']),
@@ -68,9 +81,12 @@ def format_metrics(metrics: dict) -> str:
             ('Rimossi', containers['destroyed']),
         )),
     ]
+
+    # Inserisce il dettaglio dei motivi di rifiuto solo se presenti.
     if total['rejections_by_reason']:
         sections.insert(1, _section('Motivi di rifiuto', sorted(total['rejections_by_reason'].items())))
 
+    # Tabella di dettaglio per funzione, se ci sono invocazioni osservate.
     if metrics['by_function']:
         sections.append(_table(
             'Invocazioni per funzione',
@@ -82,6 +98,7 @@ def format_metrics(metrics: dict) -> str:
             ),
         ))
 
+    # Tabella di riepilogo per regione e, se presenti, gli offload interregionali.
     primary = metrics['primary_region']
     sections.append(_table(
         'Invocazioni per regione',
@@ -104,7 +121,7 @@ def format_metrics(metrics: dict) -> str:
 
 
 def format_final_report(statistics: 'FinalStatistics', scenario: Path) -> str:
-    """Formatta il report della CLI dalla notifica finale."""
+    """Formatta il report della CLI a partire dalla notifica finale della replica."""
     outcomes = {'completed': 'Terminata', 'interrupted': 'Interrotta', 'failed': 'Fallita'}
     header = _section('Riepilogo simulazione', (
         ('Scenario', scenario),
