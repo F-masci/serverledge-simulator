@@ -18,10 +18,10 @@ from sim.model.region import Region
 from sim.model.request import Request, RequestStatus
 from sim.observer import FinalStatistics, SimulationError
 from sim.observer.observer import Observer, observer as shared_observer
+from sim.metrics import SimulationMetrics
 from sim.utils.report import format_metrics
 from sim.utils.validation import nonnegative_integer
 from .engine import SimulationEngine
-from .metrics import SimulationMetrics
 
 
 @dataclass(frozen=True)

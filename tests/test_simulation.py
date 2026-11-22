@@ -21,7 +21,7 @@ from unittest.mock import patch
 from sim.io.scenario import Scenario
 from sim.model.function import Function, FunctionProfile
 from sim.model.runtime import BuiltinRuntime, CustomRuntime
-from sim.core.metrics import SimulationMetrics
+from sim.metrics import SimulationMetrics
 from sim.core.simulation import Simulation
 from sim.model.container import ContainerState
 from sim.model.request import RequestStatus
@@ -175,10 +175,24 @@ class SimulationTest(unittest.TestCase):
     def test_metrics_subscriber_failure_stops_the_replica(self):
         failure = RuntimeError('metriche non aggiornate')
         scenario = Scenario((profiled_function('hello', 1, 1),))
-        with patch.object(SimulationMetrics, '_record_invocation', side_effect=failure):
+        with patch.object(SimulationMetrics, 'on_notification', side_effect=failure):
             with self.assertRaises(RuntimeError) as raised:
                 Simulation(scenario).run(arrivals=1)
         self.assertIs(raised.exception, failure)
+
+    def test_metrics_collectors_can_be_inspected_printed_and_serialized_individually(self):
+        scenario = Scenario((profiled_function('hello', 1, 2),), infrastructure=EDGE)
+        simulation = Simulation(scenario)
+        simulation.run(arrivals=2)
+
+        metrics = simulation._ctx.metrics
+        self.assertEqual(set(metrics.collectors), {'invocations', 'containers', 'nodes', 'topology'})
+        for name in ('invocations', 'containers', 'nodes', 'topology'):
+            data = metrics.collector_dict(name, simulation.now)
+            self.assertEqual(data, metrics.collectors[name].to_dict(simulation.now))
+            self.assertIn(f'[{name}]', metrics.format_collector(name, simulation.now))
+            self.assertEqual(json.loads(metrics.collectors[name].to_json(simulation.now)), data)
+        self.assertEqual(json.loads(metrics.to_json(simulation.now)), metrics.to_dict(simulation.now))
 
     def test_example_scenario_formats_define_the_same_workload(self):
         examples = Path(__file__).resolve().parents[1] / 'examples/scenarios'

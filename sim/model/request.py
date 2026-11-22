@@ -183,6 +183,11 @@ class Request:
         return self._allow_offloading and self._offloaded_from is None
 
     @property
+    def offloaded_from(self) -> 'Node | None':
+        """Nodo sorgente da cui la richiesta è stata inoltrata, o None se non offloaded."""
+        return self._offloaded_from
+
+    @property
     def region_arrival_time(self) -> float:
         return self._region_arrival_time
 
