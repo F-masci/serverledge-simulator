@@ -2,9 +2,8 @@
 
 from bisect import bisect_left
 from collections.abc import Callable, Iterator
+import json
 from typing import TYPE_CHECKING
-
-from pip._internal.resolution.resolvelib import candidates
 
 from .function import Function
 from .node import Node
@@ -194,6 +193,40 @@ class ArchitectureRing:
 
         destination = node.receive(request)
         return destination
+
+    #####################
+    ### Serialization ###
+    #####################
+
+    def __str__(self) -> str:
+        """Restituisce una descrizione leggibile dell'anello."""
+        return (
+            f'ArchitectureRing(id={self._id}, arch={self._arch}, '
+            f'memory_mb={self._memory}, cpus={self._cpus}, nodes={len(self._nodes)})'
+        )
+
+    def to_dict(self) -> dict:
+        """Restituisce la configurazione e lo stato dei nodi dell'anello in un formato serializzabile."""
+        return {
+            'id': self._id,
+            'arch': self._arch,
+            'memory_mb': self._memory,
+            'cpus': self._cpus,
+            'replicas': self._replicas,
+            'region': self.region.name,
+            'nodes': [node.to_dict() for node in self._nodes],
+        }
+
+    def to_json(self) -> str:
+        """Serializza l'anello per la stampa o l'esportazione."""
+        return json.dumps(self.to_dict(), ensure_ascii=False, allow_nan=False)
+
+    def __repr__(self) -> str:
+        return f'<ArchitectureRing id={self._id} arch={self._arch} nodes={len(self._nodes)}>'
+
+    ###############
+    ### Utility ###
+    ###############
 
     def __len__(self) -> int:
         return len(self._nodes)

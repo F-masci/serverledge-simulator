@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from itertools import islice
+import json
 from typing import TYPE_CHECKING
 
 from .request import Request
@@ -44,6 +45,40 @@ class NodeScheduling:
     nearest_neighbors: tuple[Node, ...] | None = None
     remote_region: 'Region | None' = None
 
+    #####################
+    ### Serialization ###
+    #####################
+
+    def __str__(self) -> str:
+        """Restituisce una descrizione leggibile della configurazione di scheduling."""
+        fields = self.to_dict()
+        details = ', '.join(f'{name}={value}' for name, value in fields.items() if value is not None)
+        return f'NodeScheduling({details})'
+
+    def to_dict(self) -> dict:
+        """Restituisce la configurazione di scheduling con i riferimenti espressi come ID."""
+        return {
+            'policy': self.policy.value,
+            'fallback_local': self.fallback_local,
+            'nearest_neighbors': (
+                [node.id.key for node in self.nearest_neighbors]
+                if self.nearest_neighbors is not None
+                else None
+            ),
+            'remote_region': self.remote_region.name if self.remote_region is not None else None,
+        }
+
+    def to_json(self) -> str:
+        """Serializza la configurazione di scheduling per la stampa o l'esportazione."""
+        return json.dumps(self.to_dict(), ensure_ascii=False, allow_nan=False)
+
+    def __repr__(self) -> str:
+        remote = self.remote_region.name if self.remote_region is not None else None
+        return (
+            f'<NodeScheduling policy={self.policy.value} '
+            f'fallback_local={self.fallback_local} remote_region={remote}>'
+        )
+
 
 
 class OffloadingScheduler(ABC):
@@ -75,6 +110,30 @@ class OffloadingScheduler(ABC):
 
         # Inoltra la richiesta al nodo con la politica di accodamento configurata.
         return node.submit(request, allow_queue=allow_queue, reject_on_failure=reject_on_failure)
+
+    #####################
+    ### Serialization ###
+    #####################
+
+    def __str__(self) -> str:
+        """Restituisce una descrizione leggibile dello scheduler."""
+        fields = self._settings.to_dict()
+        details = ', '.join(f'{name}={value}' for name, value in fields.items() if value is not None)
+        return f'{type(self).__name__}({details})'
+
+    def to_dict(self) -> dict:
+        """Restituisce lo stato dello scheduler in un formato serializzabile."""
+        return {
+            'type': type(self).__name__,
+            **self._settings.to_dict(),
+        }
+
+    def to_json(self) -> str:
+        """Serializza lo scheduler per la stampa o l'esportazione."""
+        return json.dumps(self.to_dict(), ensure_ascii=False, allow_nan=False)
+
+    def __repr__(self) -> str:
+        return f'<{type(self).__name__} policy={self._settings.policy.value}>'
 
 
 class DefaultScheduler(OffloadingScheduler):
