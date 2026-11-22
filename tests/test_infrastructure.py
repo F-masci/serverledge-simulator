@@ -1,9 +1,14 @@
 """Inventario e isolamento delle risorse dei nodi simulati."""
 
+import json
 import unittest
 
+from sim.bindings import NodeBindings, RequestBindings
+from sim.model.function import Function
 from sim.model.infrastructure import Infrastructure
-from sim.model.function import Function, BuiltinRuntime
+from sim.model.region import Region, RegionMode
+from sim.model.request import Request, RequestStatus
+from sim.model.runtime import BuiltinRuntime
 
 
 class InfrastructureTest(unittest.TestCase):
@@ -26,7 +31,7 @@ class InfrastructureTest(unittest.TestCase):
         node = infra.create_node('x86-small', 'n1', 'cpu')
 
         self.assertIs(infra.create_ring('x86-small', cpus=4), ring)
-        self.assertEqual(ring.cpus, 2)
+        self.assertEqual(node.resources.total_cpus, 2)
         self.assertEqual(created_rings, [ring])
         self.assertEqual(created_nodes, [node])
         self.assertEqual((node.id.arch, node.id.machine_tag), ('amd64', 'cpu'))
@@ -45,7 +50,7 @@ class InfrastructureTest(unittest.TestCase):
         a.acquire(Function('f', 128, 1, BuiltinRuntime('python314')))
         self.assertEqual(a.resources.used_cpus, 1)
         self.assertEqual(b.resources.used_cpus, 0)
-        self.assertEqual(small.cpus, 2)
+        self.assertEqual(a.resources.total_cpus, 2)
         self.assertIsNot(small, large)
 
     def test_conflicts_and_invalid_creation_preserve_rings(self):
@@ -62,8 +67,58 @@ class InfrastructureTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     infra.create_ring('bad', arch='amd64', memory=memory, cpus=2)
         self.assertEqual(tuple(infra.rings), ('small',))
-        self.assertEqual(ring.nodes, (node,))
-        self.assertEqual(ring.cpus, 2)
+        self.assertEqual(tuple(ring), (node,))
+        self.assertEqual(node.resources.total_cpus, 2)
+
+    def test_node_bindings_are_propagated_to_dynamically_created_rings_and_nodes(self):
+        """Anche anelli e nodi creati a runtime ereditano automaticamente i NodeBindings."""
+        registered, state_events = [], []
+        region = Region('edge')
+        bindings = NodeBindings(
+            on_node_registered=lambda node, region_name, ring_id: registered.append((node.id.key, region_name, ring_id)),
+            on_container_state_changed=lambda region_name, ring_id, node, container, prev, curr: state_events.append(
+                (region_name, ring_id, node.id.key, prev, curr)
+            ),
+        )
+        infra = Infrastructure(region=region, node_bindings=bindings)
+        infra.create_ring('r1', arch='amd64', memory=512, cpus=2)
+        n1 = infra.create_node('r1', 'n1')
+        # Simulazione di uno scaler che crea dinamicamente un nuovo anello e un nuovo nodo.
+        infra.create_ring('r2', arch='arm64', memory=256, cpus=1)
+        n2 = infra.create_node('r2', 'n2')
+
+        self.assertEqual(registered, [('n1', 'edge', 'r1'), ('n2', 'edge', 'r2')])
+        fun = Function('f', 128, 1, BuiltinRuntime('python314'))
+        n1.acquire(fun)
+        n2.acquire(fun)
+        self.assertEqual([(e[0], e[1], e[2]) for e in state_events], [('edge', 'r1', 'n1'), ('edge', 'r2', 'n2')])
+
+    def test_request_bindings_and_model_serialization(self):
+        """RequestBindings collega il ciclo di vita di Request e i model sono serializzabili in JSON."""
+        events = []
+        bindings = RequestBindings(
+            on_accepted=lambda req: events.append(('accepted', req.id)),
+            on_completed=lambda req: events.append(('completed', req.id)),
+            on_state_changed=lambda req, prev, curr: events.append(('state', prev, curr)),
+        )
+        fun = Function('f', 128, 1, BuiltinRuntime('python314'))
+        region = Region('cloud')
+        self.assertIs(region.mode, RegionMode.ALWAYS_SUCCEEDS)
+        self.assertTrue(region.is_always_succeeds)
+
+        request = Request(fun)
+        bindings.bind(request)
+        region.submit(request, now=0.0)
+        request.complete(0.0)
+
+        self.assertIn(('accepted', request.id), events)
+        self.assertIn(('completed', request.id), events)
+        self.assertIn(('state', RequestStatus.CREATED, RequestStatus.ACCEPTED), events)
+        self.assertIn(('state', RequestStatus.ACCEPTED, RequestStatus.COMPLETED), events)
+
+        for obj in (region, fun, fun.runtime, Infrastructure(region=region)):
+            parsed = json.loads(obj.to_json())
+            self.assertEqual(parsed, obj.to_dict())
 
 
 if __name__ == '__main__':

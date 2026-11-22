@@ -245,7 +245,7 @@ class Simulation:
         self, request: Request, previous: RequestStatus, current: RequestStatus,
     ) -> None:
         """Gestisce l'accettazione della richiesta (diretta o estratta dalla FIFO)."""
-        if not current is not RequestStatus.ACCEPTED:
+        if current is not RequestStatus.ACCEPTED:
             return
 
         # Calcola il tempo di attesa in coda solo se la richiesta proviene dalla FIFO.

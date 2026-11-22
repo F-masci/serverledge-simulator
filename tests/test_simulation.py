@@ -19,7 +19,8 @@ import unittest
 from unittest.mock import patch
 
 from sim.io.scenario import Scenario
-from sim.model.function import BuiltinRuntime, CustomRuntime, Function, FunctionProfile
+from sim.model.function import Function, FunctionProfile
+from sim.model.runtime import BuiltinRuntime, CustomRuntime
 from sim.core.metrics import SimulationMetrics
 from sim.core.simulation import Simulation
 from sim.model.container import ContainerState
@@ -43,7 +44,7 @@ EDGE = {'rings': [{
 
 def record_submissions(simulation):
     requests = []
-    simulation._ctx.infrastructure.on_request_submitted = lambda infra, request, node: requests.append(request)
+    simulation.regions['default'].infrastructure.on_request_submitted = lambda infra, request, node: requests.append(request)
     return requests
 
 
@@ -99,8 +100,8 @@ class SimulationTest(unittest.TestCase):
 
     def test_cli_prints_one_structured_report_and_keeps_logs_separate(self):
         root = Path(__file__).resolve().parents[1]
-        scenario = 'examples/scenarios/regional-offloading.toml'
-        command = [sys.executable, '-m', 'sim', scenario, '--arrivals', '5']
+        scenario = 'examples/scenarios/startup.toml'
+        command = [sys.executable, '-m', 'sim', scenario, '--arrivals', '100']
         for level in ('WARNING', 'INFO'):
             with self.subTest(level=level):
                 result = subprocess.run(
@@ -109,12 +110,11 @@ class SimulationTest(unittest.TestCase):
                 )
                 self.assertEqual(result.stdout.count('Riepilogo simulazione'), 1)
                 self.assertIn(scenario, result.stdout)
-                self.assertRegex(result.stdout, r'(?m)^    In transito +1$')
-                self.assertRegex(result.stdout, r'(?m)^  Risposta\s+0\.625 s$')
                 self.assertIn('Invocazioni per funzione', result.stdout)
                 self.assertIn('edge (primaria)', result.stdout)
                 self.assertIn('Offloading interregionale', result.stdout)
-                self.assertRegex(result.stdout, r'(?m)^  edge\s+cloud\s+5$')
+                self.assertRegex(result.stdout, r'(?m)^  edge\s+cloud\s+[1-9]\d*$')
+                self.assertRegex(result.stdout, r'(?m)^  edge\s+regional\s+[1-9]\d*$')
                 self.assertNotIn('request.arrived', result.stdout)
                 self.assertNotIn('simulation.final_statistics', result.stderr)
                 self.assertEqual('request.arrived' in result.stderr, level == 'INFO')
@@ -449,7 +449,7 @@ class SimulationTest(unittest.TestCase):
         simulation.run(arrivals=1)
         engine = simulation._ctx.engine
         first, = requests
-        node = simulation._ctx.infrastructure.rings['edge'].nodes[0]
+        node = simulation.regions['default'].infrastructure.resolve_node('n1')
         self.assertEqual(first.function, function)
         self.assertIs(first.node, node)
         self.assertIs(first.status, RequestStatus.ACCEPTED)

@@ -1,11 +1,10 @@
 """Ingressi regionali e trasferimenti tra infrastrutture indipendenti."""
 
-from pathlib import Path
 import unittest
 
 from sim.core.simulation import Simulation
 from sim.io.scenario import Scenario
-from sim.model.request import Request, RequestStatus
+from sim.model.request import RequestStatus
 from sim.observer import NotificationType, observer
 
 
@@ -38,8 +37,15 @@ class RegionsTest(unittest.TestCase):
         self.assertEqual(engine.now, time)
 
     def test_offload_to_always_successful_region_counts_one_arrival_and_round_trip(self):
-        path = Path(__file__).resolve().parents[1] / 'examples/scenarios/regional-offloading.toml'
-        simulation = Simulation(Scenario.load(path))
+        simulation = Simulation(Scenario(
+            [dict(FUNCTION, arrival_rate=1)], invocation={'can_offload': True}, regions={
+                'edge': simulated_region(policy='cloudonly', remote_region='cloud'),
+                'cloud': {
+                    'mode': 'always_succeeds', 'service_time_s': 0.375,
+                    'offload_latency_s': 0.5, 'offload_latency_by_source_s': {'edge': 0.25},
+                },
+            },
+        ))
 
         initial = simulation.run(arrivals=1).metrics
         self.assertEqual(initial['primary_region'], 'edge')
@@ -110,23 +116,24 @@ class RegionsTest(unittest.TestCase):
             'offload_latency_s': 4,
             'offload_latency_by_source_s': {'north': 2, 'local': 0},
         }
-        scenario = Scenario([dict(FUNCTION, first_arrival_time=10)], regions=regions)
-        simulation = Simulation(scenario)
-        simulation.run(arrivals=0)
-
-        requests = {}
-        for source in sources:
-            request = Request(scenario.function_registry['f'], can_offload=True)
-            requests[request.id] = source
-            simulation.submit(request, region=source)
-        self.advance_to(simulation, 4.5)
-
-        admissions = {requests[event.request_id]: event.sim_time_s for event in self.notifications
-                      if event.type is NotificationType.REQUEST_ACCEPTED}
-        completions = {requests[event.request_id]: event.response_time_s for event in self.notifications
-                       if event.type is NotificationType.REQUEST_COMPLETED}
-        self.assertEqual(admissions, {'north': 1, 'local': 0, 'south': 2})
-        self.assertEqual(completions, {'north': 2.5, 'local': 0.5, 'south': 4.5})
+        for source, admission, completion in (
+            ('north', 1, 2.5), ('local', 0, 0.5), ('south', 2, 4.5),
+        ):
+            with self.subTest(source=source):
+                simulation = Simulation(Scenario(
+                    [FUNCTION], regions=regions,
+                    invocation={'entry_region': source, 'can_offload': True},
+                ))
+                simulation.run(arrivals=1)
+                self.advance_to(simulation, completion)
+                received, = [event for event in self.notifications
+                             if event.run_id == simulation.run_id
+                             and event.type is NotificationType.REQUEST_ACCEPTED]
+                completed, = [event for event in self.notifications
+                              if event.run_id == simulation.run_id
+                              and event.type is NotificationType.REQUEST_COMPLETED]
+                self.assertEqual(received.sim_time_s, admission)
+                self.assertEqual(completed.response_time_s, completion)
 
     def test_cannot_offload_again_from_a_simulated_destination(self):
         scenario = Scenario([FUNCTION], invocation={'can_offload': True}, regions={

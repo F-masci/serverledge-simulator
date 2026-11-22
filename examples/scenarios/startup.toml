@@ -1,12 +1,17 @@
+# Scenario dimostrativo multiregione. Eseguire con almeno 100 arrivi.
 seed = 12345
+primary_region = "edge"
 load_balancer = "Random"
 
+[invocation]
+can_offload = true
+
 [scheduler.queue]
-capacity = 0
+capacity = 2
 
 [containers]
-idle_timeout = 600.0
-cleanup_interval = 30.0
+idle_timeout = 2.0
+cleanup_interval = 0.5
 
 [containers.startup_times]
 "grussorusso/serverledge-python314" = 0.125
@@ -20,6 +25,7 @@ memory_mb = 128
 cpu_demand = 1.0
 max_concurrency = 1
 supported_archs = ["amd64", "arm64"]
+tag_pattern = "amd64*"
 arrival_rate = 2.0
 service_rate = 4.0
 
@@ -32,18 +38,135 @@ memory_mb = 256
 cpu_demand = 0.5
 max_concurrency = 2
 supported_archs = ["amd64"]
+tag_pattern = "amd64*"
 arrival_rate = 1.0
 service_rate = 2.0
 
-[[infrastructure.rings]]
+[[regions.edge.infrastructure.rings]]
 id = "edge-x86"
 arch = "amd64"
 memory_mb = 512
 cpus = 2.0
 
-[[infrastructure.rings.nodes]]
+[[regions.edge.infrastructure.rings.nodes]]
 name = "edge-1"
 
-[[infrastructure.rings.nodes]]
+[[regions.edge.infrastructure.rings.nodes]]
 name = "edge-2"
 machine_tag = "amd64/standard"
+
+[[functions]]
+name = "telemetry"
+runtime = "python314"
+supported_archs = ["arm64"]
+tag_pattern = "gateway-arm"
+memory_mb = 128
+cpu_demand = 1.0
+first_arrival_time = 2
+arrival_rate = 2
+service_rate = 2
+arrival_distribution = "deterministic"
+service_distribution = "deterministic"
+
+[[functions]]
+name = "archive"
+runtime = "python314"
+supported_archs = ["arm64"]
+tag_pattern = "archive-arm"
+memory_mb = 128
+cpu_demand = 1.0
+first_arrival_time = 2.25
+arrival_rate = 0.5
+service_rate = 2
+arrival_distribution = "deterministic"
+service_distribution = "deterministic"
+
+[[functions]]
+name = "burst"
+runtime = "python314"
+supported_archs = ["arm64"]
+tag_pattern = "forward-arm"
+memory_mb = 128
+cpu_demand = 1.0
+first_arrival_time = 2.5
+arrival_rate = 4
+service_rate = 2
+arrival_distribution = "deterministic"
+service_distribution = "deterministic"
+
+[[functions]]
+name = "index"
+runtime = "python314"
+supported_archs = ["arm64"]
+tag_pattern = "regional-arm"
+memory_mb = 128
+cpu_demand = 1.0
+first_arrival_time = 3
+arrival_rate = 0.5
+service_rate = 4
+arrival_distribution = "deterministic"
+service_distribution = "deterministic"
+
+
+# Nodi ARM con policy diverse, selezionati tramite il machine tag della funzione.
+[[regions.edge.infrastructure.rings]]
+id = "edge-arm-gateways"
+arch = "arm64"
+memory_mb = 512
+cpus = 1.0
+
+[[regions.edge.infrastructure.rings.nodes]]
+name = "gateway"
+machine_tag = "gateway-arm"
+policy = "edgecloud"
+remote_region = "regional"
+
+[[regions.edge.infrastructure.rings.nodes]]
+name = "archive"
+machine_tag = "archive-arm"
+policy = "cloudonly"
+remote_region = "cloud"
+
+[[regions.edge.infrastructure.rings.nodes]]
+name = "forwarder"
+machine_tag = "forward-arm"
+policy = "edgeonly"
+nearest_neighbors = ["edge-worker"]
+
+[[regions.edge.infrastructure.rings.nodes]]
+name = "relay"
+machine_tag = "regional-arm"
+policy = "cloudonly"
+remote_region = "regional"
+
+[[regions.edge.infrastructure.rings]]
+id = "edge-arm-workers"
+arch = "arm64"
+memory_mb = 512
+cpus = 1.0
+
+[[regions.edge.infrastructure.rings.nodes]]
+name = "edge-worker"
+
+# Destinazione con risorse e container propri.
+[regions.regional]
+has_load_balancer = false
+offload_latency_s = 0.5
+
+[[regions.regional.infrastructure.rings]]
+id = "regional-arm"
+arch = "arm64"
+memory_mb = 512
+cpus = 1.0
+
+[[regions.regional.infrastructure.rings.nodes]]
+name = "regional-worker"
+
+# Destinazione astratta con tempo di servizio e latenza per origine.
+[regions.cloud]
+mode = "always_succeeds"
+service_time_s = 0.375
+offload_latency_s = 0.5
+
+[regions.cloud.offload_latency_by_source_s]
+edge = 0.25

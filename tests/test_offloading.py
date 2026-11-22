@@ -6,7 +6,8 @@ import unittest
 
 from sim.core.simulation import Simulation
 from sim.io.scenario import Scenario
-from sim.model.function import BuiltinRuntime, Function
+from sim.model.function import Function
+from sim.model.runtime import BuiltinRuntime
 from sim.model.infrastructure import Infrastructure
 from sim.model.offloading import NodeScheduling, OffloadingScheduler, SchedulingPolicy
 from sim.model.region import Region

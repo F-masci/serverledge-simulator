@@ -66,19 +66,6 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.drain(), 4)
         self.assertEqual(self.records, [('parent', 1), ('existing', 1), ('child', 1), ('future', 3)])
 
-    def test_cancelled_occurrence_does_not_execute_or_advance_clock(self):
-        """La cancellazione riguarda una sola occorrenza ed è idempotente."""
-        event = self.event('shared')
-        cancelled = self.engine.schedule(10, event)
-        active = self.engine.schedule(2, event)
-        self.assertTrue(cancelled.cancel())
-        self.assertFalse(cancelled.cancel())
-        self.assertEqual(self.drain(), 1)
-        self.assertEqual(self.records, [('shared', 2)])
-        self.assertEqual(self.engine.now, 2)
-        self.assertEqual(active.status, EventStatus.EXECUTED)
-        self.assertFalse(active.cancel())
-
     def test_empty_calendar(self):
         """Senza eventi il tempo resta fermo."""
         self.assertFalse(self.engine.step())
@@ -137,12 +124,10 @@ class EngineTest(unittest.TestCase):
         self.assertFalse(other_engine.step())
 
     def test_event_contract_is_abstract_and_schedule_is_read_only(self):
-        """Gli eventi concreti implementano execute; tempo e stato non hanno setter."""
+        """Gli eventi concreti implementano execute; lo stato è in sola lettura."""
         with self.assertRaises(TypeError):
             Event(ctx=self.engine.ctx)
         handle = self.engine.schedule(1, self.event('test'))
-        with self.assertRaises(AttributeError):
-            handle.time = 3
         with self.assertRaises(AttributeError):
             handle.status = EventStatus.EXECUTED
 

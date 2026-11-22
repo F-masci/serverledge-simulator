@@ -13,7 +13,8 @@ from sim.model.load_balancer import (
     ArchitectureUnawareLoadBalancer, MABLoadBalancer, RandomLoadBalancer, RoundRobinLoadBalancer,
 )
 from sim.model.request import Request, RequestStatus
-from sim.model.function import Function, BuiltinRuntime
+from sim.model.function import Function
+from sim.model.runtime import BuiltinRuntime
 
 
 def function(name='hello', archs=('amd64', 'arm64')):

@@ -17,7 +17,8 @@ Riferimenti al codice Infrascaler (percorsi relativi al repository):
 
 import unittest
 
-from sim.model.function import Function, BuiltinRuntime, CustomRuntime
+from sim.model.function import Function
+from sim.model.runtime import BuiltinRuntime, CustomRuntime
 from sim.model.node import Node
 from sim.model.container import ContainerState
 

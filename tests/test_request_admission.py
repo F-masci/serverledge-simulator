@@ -9,7 +9,8 @@ e la FIFO locale configurabile.
 import unittest
 
 from sim.model.node import Node
-from sim.model.function import Function, BuiltinRuntime
+from sim.model.function import Function
+from sim.model.runtime import BuiltinRuntime
 from sim.model.request import Request, RequestStatus
 from sim.model.container import ContainerState
 
