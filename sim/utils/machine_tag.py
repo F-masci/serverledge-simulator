@@ -24,7 +24,7 @@ def validate_tag_pattern(pattern: str) -> None:
             raise ValueError(f'tag_pattern non supportato da RE2: {pattern!r}')
         try:
             re.compile(pattern)
-        except re.PatternError as error:
+        except re.error as error:
             raise ValueError(f'tag_pattern non valido: {pattern!r}') from error
 
 
@@ -67,7 +67,7 @@ def _matches_requirement(
     if requirement.startswith('^') or requirement.endswith('$') or '.*' in requirement:
         try:
             return re.search(requirement, tag) is not None
-        except (re.PatternError, OverflowError):
+        except (re.error, OverflowError):
             return False
 
     # Pattern con wildcard '*' tradotto in corrispondenza sull'intera stringa.

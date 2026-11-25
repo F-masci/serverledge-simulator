@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from .notifications import (
     ContainerStarted, ContainerStateChanged, ContainerStopped, NodeRegistered, NodeRemoved, Notification,
     RequestAccepted, RequestArrived, RequestCompleted, RequestDelivered, RequestDequeued, RequestForwarded,
-    RequestQueued, RequestRejected, RequestRejectionReturning,
+    RequestQueued, RequestRejected, RequestRejectionReturning, ScalerDecision,
 )
 from .notifications.node import ContainerSnapshot, ResourceSnapshot
 from ..model.container import ContainerState, DockerContainer
@@ -208,6 +208,39 @@ class Observer:
             previous=previous,
             state=current,
             resources=ResourceSnapshot.from_node(node),
+        ))
+
+    def notify_scaler_decision(
+        self,
+        region: 'Region',
+        *,
+        decision_id: int,
+        algorithm: str,
+        action: str,
+        ring_id: str | None,
+        outcome: str,
+        node_name: str | None = None,
+        reward: float | None = None,
+        k_cost: float | None = None,
+        d_cost_req_s: float | None = None,
+        energy_kwh: float | None = None,
+    ) -> None:
+        """Pubblica la decisione periodica dello scaler regionale con reward e costi."""
+        ctx = self._ensure_context()
+        self.notify(ScalerDecision(
+            run_id=ctx.simulation.run_id,
+            sim_time_s=ctx.engine.now,
+            region=region,
+            decision_id=decision_id,
+            algorithm=algorithm,
+            action=action,
+            ring_id=ring_id,
+            outcome=outcome,
+            node_name=node_name,
+            reward=reward,
+            k_cost=k_cost,
+            d_cost_req_s=d_cost_req_s,
+            energy_kwh=energy_kwh,
         ))
 
 

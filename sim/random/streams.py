@@ -18,6 +18,7 @@ class StreamKind(IntEnum):
     SERVICE = 2   # Campionamento delle durate di servizio.
     ROUTING = 3   # Scelte casuali di instradamento e load balancing.
     EVICTION = 4  # Ordine casuale dei pool durante l'eviction per pressione di memoria.
+    SCALING = 5   # Scelte stocastiche dello scaler RL ed eventi di provisioning.
 
 
 class RandomStreams:

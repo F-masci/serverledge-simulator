@@ -9,10 +9,12 @@ from .request import (
     RequestAccepted, RequestArrived, RequestCompleted, RequestDelivered, RequestDequeued, RequestForwarded,
     RequestQueued, RequestRejected, RequestRejectionReturning,
 )
+from .scaler import ScalerDecision
 
 __all__ = [
     'RequestAccepted', 'RequestArrived', 'RequestCompleted', 'RequestDelivered', 'RequestDequeued',
     'RequestForwarded', 'RequestQueued', 'RequestRejected', 'RequestRejectionReturning',
     'ContainerStarted', 'ContainerStateChanged', 'ContainerStopped',
-    'NodeRegistered', 'NodeRemoved', 'Notification', 'NotificationType', 'FinalStatistics', 'SimulationError',
+    'NodeRegistered', 'NodeRemoved', 'ScalerDecision', 'Notification', 'NotificationType',
+    'FinalStatistics', 'SimulationError',
 ]

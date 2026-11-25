@@ -14,9 +14,10 @@ from sim.model.load_balancer import LoadBalancerMode
 from sim.model.runtime import BuiltinRuntime, CustomRuntime, Runtime
 from sim.random.streams import RandomStreams
 from sim.utils.validation import nonempty_string, nonnegative_integer, positive_integer
-from ._scenario_config import (
-    _ContainersConfig, _FunctionConfig, _InfrastructureConfig, _InvocationConfig, _RegionConfig, _SchedulerConfig,
-)
+from .execution import _ContainersConfig, _InvocationConfig, _SchedulerConfig
+from .functions import _FunctionConfig
+from .scaler import ScalerConfig
+from .topology import _InfrastructureConfig, _RegionConfig
 
 
 @dataclass(frozen=True, init=False)
@@ -31,6 +32,7 @@ class Scenario:
     invocation: _InvocationConfig
     load_balancer: LoadBalancerMode
     load_balancer_replicas: int | None
+    scaler: ScalerConfig
     seed: int = 12345
 
     def __init__(
@@ -41,6 +43,7 @@ class Scenario:
         scheduler: Mapping[str, object] | None = None,
         load_balancer: LoadBalancerMode | str = LoadBalancerMode.ARCHITECTURE_UNAWARE,
         load_balancer_replicas: int | None = None,
+        scaler: ScalerConfig | Mapping[str, object] | str | None = None,
         invocation: Mapping[str, object] | None = None,
         regions: Mapping[str, object] | None = None,
         primary_region: str | None = None,
@@ -62,6 +65,8 @@ class Scenario:
             else None
         )
         object.__setattr__(self, 'load_balancer_replicas', replicas)
+        scaler_config = ScalerConfig.parse(scaler)
+        object.__setattr__(self, 'scaler', scaler_config)
         scheduler_config = _SchedulerConfig.parse(scheduler)
         object.__setattr__(self, 'scheduler', scheduler_config)
         containers_config = _ContainersConfig.parse(containers)
@@ -196,7 +201,7 @@ class Scenario:
         if not isinstance(data, dict):
             raise ValueError('Lo scenario deve essere una tabella')
         allowed = {'functions', 'function', 'seed', 'infrastructure', 'containers', 'scheduler',
-                   'load_balancer', 'load_balancer_replicas', 'invocation', 'regions', 'primary_region'}
+                   'load_balancer', 'load_balancer_replicas', 'scaler', 'invocation', 'regions', 'primary_region'}
         if unknown := data.keys() - allowed:
             raise ValueError(f'Parametri scenario sconosciuti: {sorted(map(str, unknown))}')
 
@@ -215,6 +220,7 @@ class Scenario:
             scheduler=data.get('scheduler'),
             load_balancer=data.get('load_balancer', LoadBalancerMode.ARCHITECTURE_UNAWARE),
             load_balancer_replicas=data.get('load_balancer_replicas'),
+            scaler=data.get('scaler'),
             invocation=data.get('invocation'),
             regions=data.get('regions'),
             primary_region=data.get('primary_region'),
@@ -239,3 +245,23 @@ class Scenario:
     def _read_json(source: TextIO) -> object:
         """Legge la configurazione JSON."""
         return json.load(source)
+
+    def __getstate__(self) -> dict:
+        return {
+            'function_registry': dict(self.function_registry),
+            'scheduler': self.scheduler,
+            'containers': self.containers,
+            'regions': dict(self.regions),
+            'primary_region': self.primary_region,
+            'invocation': self.invocation,
+            'load_balancer': self.load_balancer,
+            'load_balancer_replicas': self.load_balancer_replicas,
+            'scaler': self.scaler,
+            'seed': self.seed,
+        }
+
+    def __setstate__(self, state: dict) -> None:
+        for key, value in state.items():
+            if key in ('function_registry', 'regions'):
+                value = MappingProxyType(value)
+            object.__setattr__(self, key, value)

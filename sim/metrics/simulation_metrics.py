@@ -193,6 +193,7 @@ class SimulationMetrics:
                 'topology': self._topology.region_snapshot(name, now),
                 'rings': self._rings_snapshot(now, name, nodes_by_ring),
                 'nodes_by_ring': nodes_by_ring,
+                **({'scaler': region.scaler.metrics_snapshot(now)} if region.scaler is not None else {}),
             }
 
         all_functions = sorted(self._invocations.function_names | self._containers.function_names)

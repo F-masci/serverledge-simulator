@@ -1,5 +1,7 @@
 """Ingresso geografico delle invocazioni e gestione della topologia regionale."""
 
+from __future__ import annotations
+
 from collections.abc import Mapping
 from enum import StrEnum
 import json
@@ -11,11 +13,14 @@ from .infrastructure import Infrastructure
 from .load_balancer import LoadBalancer
 from .node import Node
 from .request import Request
+from .scaling import Scaler
 
 if TYPE_CHECKING:
     from numpy.random import Generator
+    from ray.rllib.core.rl_module.rl_module import RLModule
     from sim.bindings import NodeBindings
     from sim.io.scenario import Scenario
+    from sim.scaler.rllib import RLlibPPOPolicy
     from .ring import ArchitectureRing
 
 
@@ -41,16 +46,18 @@ class Region:
         *,
         scenario: 'Scenario | None' = None,
         node_bindings: 'NodeBindings | None' = None,
+        scaler_agent: 'RLlibPPOPolicy | RLModule | None' = None,
     ) -> None:
         # Identificativo univoco della regione
         self._name = name
 
-        # Configurazione di esecuzione, latenze e infrastruttura locale
+        # Configurazione di esecuzione, latenze, infrastruttura e scaler locale
         self._service_time_s: float = 0.0
         self._offload_latency_s: float = 0.0
         self._offload_latency_by_source_s: Mapping[str, float] = MappingProxyType({})
         self._has_load_balancer: bool = True
         self._infrastructure: Infrastructure | None = None
+        self._scaler: 'Scaler | None' = None
 
         if scenario is not None:
             config = scenario.regions[name]
@@ -64,6 +71,7 @@ class Region:
                 self._infrastructure = self._build_infrastructure(
                     scenario, node_bindings=node_bindings,
                 )
+                self._scaler = self._build_scaler(scenario, agent=scaler_agent)
 
     ### Identification ###
 
@@ -109,6 +117,11 @@ class Region:
     @property
     def infrastructure(self) -> Infrastructure | None:
         return self._infrastructure
+
+    @property
+    def scaler(self) -> 'Scaler | None':
+        """Scaler RL della regione, o None se l'autoscaling è disabilitato."""
+        return self._scaler
 
     def offload_latency_from(self, source: str) -> float:
         """Ritardo totale di andata e ritorno dalla regione sorgente."""
@@ -191,6 +204,45 @@ class Region:
 
         return infrastructure
 
+    def _build_scaler(
+        self,
+        scenario: 'Scenario',
+        *,
+        agent: 'RLlibPPOPolicy | RLModule | None' = None,
+    ) -> 'Scaler | None':
+        """Costruisce lo scaler regionale se configurato sulla regione o sullo scenario."""
+        region_config = scenario.regions[self._name]
+        scaler_config = region_config.scaler if region_config.scaler is not None else scenario.scaler
+
+        # Se lo scaler non è abilitato o la regione non ha infrastruttura, restituisce None.
+        if not scaler_config.is_enabled:
+            return None
+
+        # Se la regione non ha infrastruttura o anelli, lo scaler non può essere creato.
+        if self._infrastructure is None or not self._infrastructure.rings:
+            return None
+
+        config = region_config.infrastructure
+        assert config is not None
+
+        # Costruisce la mappa dei parametri di scaling per ogni anello.
+        ring_configs = {
+            ring.id: ring.scaling
+            for ring in config.rings
+            if ring.scaling is not None
+        }
+
+        # Crea lo scaler con uno stream PRNG dedicato alla regione.
+        stream_id = 'scaler' if self._name == scenario.primary_region else f'scaler/{self._name}'
+        return Scaler.create(
+            scaler_config,
+            region=self,
+            ring_configs=ring_configs,
+            seed=scenario.seed,
+            stream_id=stream_id,
+            agent=agent,
+        )
+
     @staticmethod
     def _create_ring(
         infrastructure: Infrastructure,
@@ -268,6 +320,7 @@ class Region:
             'offload_latency_by_source_s': dict(self._offload_latency_by_source_s),
             'has_load_balancer': self._has_load_balancer,
             'infrastructure': self._infrastructure.to_dict() if self._infrastructure is not None else None,
+            'scaler': self._scaler.to_dict() if self._scaler is not None else None,
         }
 
     def to_json(self) -> str:

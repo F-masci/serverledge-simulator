@@ -1,5 +1,7 @@
 """Infrastruttura organizzata in anelli omogenei identificati esplicitamente."""
 
+from __future__ import annotations
+
 from collections.abc import Callable, Mapping
 import json
 from types import MappingProxyType

@@ -22,6 +22,7 @@ class NotificationType(StrEnum):
     REQUEST_REJECTION_RETURNING = 'request.rejection_returning'    # Rifiuto remoto in transito verso il client.
     REQUEST_REJECTED = 'request.rejected'                          # Rifiuto definitivo della richiesta.
     REQUEST_COMPLETED = 'request.completed'              # Consegna della risposta e completamento della richiesta.
+    SCALER_DECISION = 'scaler.decision'                  # Decisione periodica dello scaler regionale.
     FINAL_STATISTICS = 'simulation.final_statistics'     # Fotografia delle metriche al termine della replica.
 
 

@@ -5,6 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from math import floor
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from sim.bindings import NodeBindings, RequestBindings
@@ -24,6 +25,10 @@ from sim.metrics import SimulationMetrics
 from sim.utils.report import format_metrics
 from sim.utils.validation import nonnegative_integer
 from .engine import SimulationEngine
+
+if TYPE_CHECKING:
+    from ray.rllib.core.rl_module.rl_module import RLModule
+    from sim.scaler.rllib import RLlibPPOPolicy
 
 
 @dataclass(frozen=True)
@@ -59,7 +64,7 @@ class SimulationContext:
 class Simulation:
     """Configura il motore e schedula gli arrivi iniziali."""
 
-    def __init__(self, scenario: Scenario) -> None:
+    def __init__(self, scenario: Scenario, *, scaler_agents: Mapping[str, 'RLlibPPOPolicy | RLModule'] | None = None) -> None:
 
         # Inizializza la simulazione con uno scenario e genera un identificatore univoco per la replica.
         self.run_id = uuid4().hex
@@ -71,7 +76,7 @@ class Simulation:
             simulation=self,
             metrics=SimulationMetrics(),
         )
-        object.__setattr__(self._ctx, 'regions', self._build_regions(scenario))
+        object.__setattr__(self._ctx, 'regions', self._build_regions(scenario, scaler_agents=scaler_agents))
 
         # Determina la regione di ingresso e il nodo di ingresso,
         # se specificato nello scenario.
@@ -106,11 +111,15 @@ class Simulation:
     def regions(self) -> Mapping[str, Region]:
         return self._ctx.regions
 
-    def _build_regions(self, scenario: Scenario) -> Mapping[str, Region]:
+    def _build_regions(self, scenario: Scenario, *, scaler_agents: Mapping[str, 'RLlibPPOPolicy | RLModule'] | None = None) -> Mapping[str, Region]:
         """Costruisce tutte le regioni dello scenario con i binding dei nodi e configura gli scheduler."""
         node_bindings = self._build_node_bindings()
+        agents = scaler_agents or {}
         regions = {
-            name: Region(name, scenario=scenario, node_bindings=node_bindings)
+            name: Region(
+                name, scenario=scenario, node_bindings=node_bindings,
+                scaler_agent=agents.get(name),
+            )
             for name in scenario.regions
         }
         self._configure_schedulers(scenario, regions)
@@ -161,12 +170,25 @@ class Simulation:
         while self._ctx.metrics.arrivals < arrivals and self._ctx.engine.step():
             pass
 
+        # Finalizza gli scaler regionali, se presenti, e raccoglie le statistiche finali.
+        for region in self.regions.values():
+            scaler = region.scaler
+            if scaler is not None:
+                scaler.finalize(self.now, truncated=True)
+
         return self._final_statistics()
 
-    def _start(self) -> tuple[ScheduledEvent, ...]:
-        """Pianifica un primo arrivo per ogni funzione, in ordine di configurazione."""
+    def _start(self, *, attach_scalers: bool = True) -> tuple[ScheduledEvent, ...]:
+        """Pianifica un primo arrivo per ogni funzione e avvia gli scaler regionali."""
         if self._started:
             raise RuntimeError('Simulazione già avviata')
+
+        # Collega gli scaler regionali all'observer e avvia il loro ciclo periodico.
+        if attach_scalers:
+            for region in self.regions.values():
+                scaler = region.scaler
+                if scaler is not None:
+                    scaler.attach(self._ctx)
 
         # Pianifica il primo arrivo per ogni funzione registrata nello scenario.
         request_bindings = self._build_request_bindings()
@@ -244,7 +266,7 @@ class Simulation:
             container_ready_event = ContainerReadyEvent(ctx=self._ctx, request=request)
             self._ctx.engine.schedule_after(cold_start_time, container_ready_event)
 
-    def _on_request_state_changed(
+    def _request_state_changed(
         self, request: Request, previous: RequestStatus, current: RequestStatus,
     ) -> None:
         """Gestisce accettazione e ritorno dei rifiuti remoti della richiesta."""
@@ -287,7 +309,8 @@ class Simulation:
             check_time = (tick + 1) * interval
         if check_time <= deadline:
             raise ValueError('Intervallo di pulizia troppo piccolo per avanzare il tempo')
-        self._ctx.engine.schedule(check_time, ContainerCleanupEvent(node, container, ctx=self._ctx))
+        container_cleanup_event = ContainerCleanupEvent(ctx=self._ctx, node=node, container=container)
+        self._ctx.engine.schedule(check_time, container_cleanup_event)
 
     def _schedule_region_delivery(
         self, node: Node, request: Request, destination: Region, target: Node | None,
@@ -334,5 +357,5 @@ class Simulation:
             on_queued=self._ctx.observer.notify_request_queued,
             on_rejected=self._ctx.observer.notify_request_rejected,
             on_completed=self._ctx.observer.notify_request_completed,
-            on_state_changed=self._on_request_state_changed,
+            on_state_changed=self._request_state_changed,
         )

@@ -206,6 +206,28 @@ def format_metrics(metrics: dict) -> str:
             ('RAM·s allocati (MB·s)', _number(topology['memory_mb_seconds_allocated'])),
         )))
 
+    # Sezione autoscaling regionale (se attivo in almeno una regione).
+    scaler_rows = [
+        (
+            region_name,
+            scaler_stats['mode'],
+            scaler_stats['decisions'],
+            f"{scaler_stats['actuator']['scale_out_completed']}/{scaler_stats['actuator']['scale_in_completed']}",
+            _number(scaler_stats['costs']['total_energy_kwh'], ' kWh'),
+            _number(scaler_stats['costs']['total_d_cost_req_s'], ' req·s'),
+            _number(scaler_stats['costs']['total_reward']),
+            scaler_stats['algorithm'].get('backend', 'n.d.'),
+        )
+        for region_name, region_stats in sorted(metrics['regions'].items())
+        if (scaler_stats := region_stats.get('scaler')) is not None
+    ]
+    if scaler_rows:
+        sections.append(_table(
+            'Autoscaling regionale',
+            ('Regione', 'Algoritmo', 'Decisioni', 'Out/In', 'Energia', 'Costo D_t', 'Reward tot.', 'Backend'),
+            scaler_rows,
+        ))
+
     return '\n\n'.join(sections)
 
 

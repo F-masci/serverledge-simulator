@@ -1,10 +1,15 @@
-"""Fine della creazione di un container riservato a una richiesta."""
+"""Eventi del ciclo di vita dei container: cold start completato e pulizia idle."""
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from .completion_event import CompletionEvent
 from .event import Event
+from .request import CompletionEvent
 from ..request import Request
+
+if TYPE_CHECKING:
+    from ..container import DockerContainer
+    from ..node import Node
 
 
 @dataclass(frozen=True)
@@ -31,3 +36,15 @@ class ContainerReadyEvent(Event):
         # Pianifica il completamento del servizio.
         completion_event = CompletionEvent(ctx=self.ctx, request=self.request)
         engine.schedule_after(duration, completion_event)
+
+
+@dataclass(frozen=True)
+class ContainerCleanupEvent(Event):
+    """Evento periodico del janitor per verificare la scadenza di un container idle."""
+
+    node: 'Node'
+    container: 'DockerContainer'
+
+    def execute(self) -> None:
+        """Segnala al nodo di rimuovere il container idle."""
+        self.node.expire(self.ctx.engine.now, container=self.container)

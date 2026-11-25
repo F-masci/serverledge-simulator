@@ -226,6 +226,26 @@ class Node:
             ),
         })
 
+    @property
+    def active_requests_count(self) -> int:
+        """Numero di invocazioni attualmente in esecuzione o in cold start sul nodo."""
+        busy_requests = sum(
+            container.requests_count
+            for pool in self._pools.values()
+            for container in pool.busy
+        )
+        return busy_requests + len(self._pending)
+
+    @property
+    def queued_requests_count(self) -> int:
+        """Numero di invocazioni in attesa nella coda FIFO del nodo."""
+        return len(self._queue)
+
+    @property
+    def is_idle(self) -> bool:
+        """Indica se il nodo non ha richieste attive, creazioni pendenti né coda."""
+        return self.active_requests_count == 0 and self.queued_requests_count == 0
+
     def _get_pool(self, function: Function) -> ContainerPool:
         if function.name not in self._pools:
             self._pools[function.name] = ContainerPool(function)
@@ -525,6 +545,18 @@ class Node:
         pool.remove_idle(container, preserve_order=preserve_order)
         self.resources.release(container.function, idle=True)
         container.destroy(evicted=evicted)
+
+    ## Lifecycle Management ##
+
+    def shutdown(self) -> None:
+            """Rimuove tutti i container idle residui al termine del drain del nodo."""
+            if not self.is_idle:
+                raise RuntimeError(f'Impossibile spegnere il nodo {self.key} con richieste ancora attive')
+
+            # Si rimuovono tutti i container idle dai pool, preservando l'ordine per evitare di invalidare le callback.
+            for pool in self._pools.values():
+                for container in tuple(pool.idle):
+                    self._destroy_idle(container, preserve_order=True, evicted=False)
 
     ## Callback handling ##
 
