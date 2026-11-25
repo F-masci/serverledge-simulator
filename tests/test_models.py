@@ -17,10 +17,10 @@ Riferimenti al codice Infrascaler (percorsi relativi al repository):
 
 import unittest
 
-from sim.model.function import Function
-from sim.model.runtime import BuiltinRuntime, CustomRuntime, Runtime
-from sim.model.node import Node
-from sim.model.container import ContainerState
+from simulator.model.execution.container import ContainerState
+from simulator.model.execution.function import Function
+from simulator.model.execution.runtime import BuiltinRuntime, CustomRuntime, Runtime
+from simulator.model.topology.node import Node
 
 
 def function(name='f', concurrency=2, memory=128, runtime=None):

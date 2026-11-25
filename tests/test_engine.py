@@ -4,12 +4,12 @@ Il progressivo risolve i pareggi senza confrontare eventi. Le occorrenze
 conservano il proprio stato e gli eventi usano il contesto della replica.
 """
 
-from dataclasses import dataclass
 import unittest
+from dataclasses import dataclass
 
-from sim.core import Event, EventStatus
-from sim.core.simulation import Simulation
-from sim.io.scenario import Scenario
+from simulator.core import Event, EventStatus
+from simulator.core.simulation import Simulation
+from simulator.io.scenario import Scenario
 
 
 @dataclass(frozen=True)

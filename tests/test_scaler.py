@@ -1,23 +1,22 @@
 """Test unitari e di integrazione per Gymnasium e Ray RLlib PPO nello scaler regionale."""
 
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 
-from gymnasium.utils.env_checker import check_env
 import numpy as np
-
-from sim.core.simulation import Simulation
-from sim.io.scenario import Scenario
-from sim.model.scaling import PPOScaler
-from sim.observer.notifications import NotificationType
-from sim.random.streams import RandomStreams, StreamKind
-from sim.scaler import (
+from gymnasium.utils.env_checker import check_env
+from simulator.core.simulation import Simulation
+from simulator.io.scenario import Scenario
+from simulator.model.scaling import PPOScaler
+from simulator.observer.notifications import NotificationType
+from simulator.random.streams import RandomStreams, StreamKind
+from simulator.scaler import (
     CommandOutcome, FEATURES_PER_RING, PPOConfig, RLlibPPOPolicy,
     RewardConfig, RingObservation, ScalingActionKind, ScalingBackend, ScalingCommand,
     ScalingResult, ZoneController, ZoneObservation, load_rllib_module,
 )
-from sim.utils.report import format_metrics
+from simulator.utils.report import format_metrics
 from trainer import ServerledgeScalingEnv, train_rllib_ppo
 
 
@@ -216,7 +215,7 @@ class TestActuatorAndLifecycle(unittest.TestCase):
         self.assertIs(ring_act.select_scale_in_candidate(), node_a)
 
         fn = scenario.function_registry['fn-any']
-        from sim.model.request import Request
+        from simulator.model.execution.request import Request
         req = Request(fn, service_duration=2.0, arrival_time=0.0)
         sim._build_request_bindings().bind(req)
         region.submit(req, now=0.0, node=node_a)

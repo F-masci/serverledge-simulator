@@ -1,17 +1,17 @@
 """Scelte di scheduling delle invocazioni verificate contro Infrascaler."""
 
+import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import unittest
 
-from sim.core.simulation import Simulation
-from sim.io.scenario import Scenario
-from sim.model.function import Function
-from sim.model.runtime import BuiltinRuntime
-from sim.model.infrastructure import Infrastructure
-from sim.model.offloading import NodeScheduling, OffloadingScheduler, SchedulingPolicy
-from sim.model.region import Region
-from sim.model.request import Request, RequestStatus
+from simulator.core.simulation import Simulation
+from simulator.io.scenario import Scenario
+from simulator.model.execution.function import Function
+from simulator.model.execution.request import Request, RequestStatus
+from simulator.model.execution.runtime import BuiltinRuntime
+from simulator.model.scheduling.offloading import NodeScheduling, OffloadingScheduler, SchedulingPolicy
+from simulator.model.topology.infrastructure import Infrastructure
+from simulator.model.topology.region import Region
 
 
 class OffloadingTest(unittest.TestCase):

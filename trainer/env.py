@@ -8,16 +8,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import gymnasium as gym
-from gymnasium import spaces
 import numpy as np
-
-from sim.io.scenario import Scenario
-from sim.model.events import Event
-from sim.io.scaler import ScalerConfig, ScalerMode
-from sim.scaler.contracts import FEATURES_PER_RING, ScalingCommand
+from gymnasium import spaces
+from simulator.io.scaler import ScalerConfig, ScalerMode
+from simulator.io.scenario import Scenario
+from simulator.model.events import Event
+from simulator.scaler.contracts import FEATURES_PER_RING, ScalingCommand
 
 if TYPE_CHECKING:
-    from sim.core.simulation import Simulation
+    from simulator.core.simulation import Simulation
 
 
 @dataclass(frozen=True)
@@ -128,7 +127,7 @@ class ServerledgeScalingEnv(gym.Env):
         self._step_count = 0
 
         # Ricostruisce lo scenario con il seed dell'episodio per avere tracce distinte ma riproducibili.
-        from sim.core.simulation import Simulation
+        from simulator.core.simulation import Simulation
 
         scenario = self._scenario_with_seed(run_seed)
         sim = Simulation(scenario)

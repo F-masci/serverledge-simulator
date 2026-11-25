@@ -3,12 +3,12 @@
 import json
 import unittest
 
-from sim.bindings import NodeBindings, RequestBindings
-from sim.model.function import Function
-from sim.model.infrastructure import Infrastructure
-from sim.model.region import Region, RegionMode
-from sim.model.request import Request, RequestStatus
-from sim.model.runtime import BuiltinRuntime
+from simulator.bindings import NodeBindings, RequestBindings
+from simulator.model.execution.function import Function
+from simulator.model.execution.request import Request, RequestStatus
+from simulator.model.execution.runtime import BuiltinRuntime
+from simulator.model.topology.infrastructure import Infrastructure
+from simulator.model.topology.region import Region, RegionMode
 
 
 class InfrastructureTest(unittest.TestCase):

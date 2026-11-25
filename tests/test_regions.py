@@ -2,11 +2,10 @@
 
 import unittest
 
-from sim.core.simulation import Simulation
-from sim.io.scenario import Scenario
-from sim.model.request import RequestStatus
-from sim.observer import NotificationType, observer
-
+from simulator.core.simulation import Simulation
+from simulator.io.scenario import Scenario
+from simulator.model.execution.request import RequestStatus
+from simulator.observer import NotificationType, observer
 
 FUNCTION = {
     'name': 'f', 'runtime': 'python314', 'memory_mb': 128, 'cpu_demand': 1,

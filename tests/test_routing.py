@@ -5,16 +5,16 @@ HashRing.Get per l'ordine delle repliche virtuali e la ricerca di altri nodi;
 internal/lb/generalLoadBalancer.go per il filtro di compatibilità e il fallback.
 """
 
-from dataclasses import replace
 import unittest
+from dataclasses import replace
 
-from sim.model.infrastructure import Infrastructure
-from sim.model.load_balancer import (
+from simulator.model.execution.function import Function
+from simulator.model.execution.request import Request, RequestStatus
+from simulator.model.execution.runtime import BuiltinRuntime
+from simulator.model.scheduling.load_balancer import (
     ArchitectureUnawareLoadBalancer, MABLoadBalancer, RandomLoadBalancer, RoundRobinLoadBalancer,
 )
-from sim.model.request import Request, RequestStatus
-from sim.model.function import Function
-from sim.model.runtime import BuiltinRuntime
+from simulator.model.topology.infrastructure import Infrastructure
 
 
 def function(name='hello', archs=('amd64', 'arm64')):

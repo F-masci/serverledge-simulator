@@ -8,11 +8,11 @@ e la FIFO locale configurabile.
 
 import unittest
 
-from sim.model.node import Node
-from sim.model.function import Function
-from sim.model.runtime import BuiltinRuntime
-from sim.model.request import Request, RequestStatus
-from sim.model.container import ContainerState
+from simulator.model.execution.container import ContainerState
+from simulator.model.execution.function import Function
+from simulator.model.execution.request import Request, RequestStatus
+from simulator.model.execution.runtime import BuiltinRuntime
+from simulator.model.topology.node import Node
 
 
 class RequestAdmissionTest(unittest.TestCase):

@@ -9,26 +9,26 @@ Riferimenti Infrascaler:
 - internal/node/janitor_handler.go: pulizia periodica dei container scaduti.
 """
 
-from dataclasses import replace
 import json
-from pathlib import Path
 import subprocess
 import sys
-from tempfile import TemporaryDirectory
 import unittest
+from dataclasses import replace
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from sim.io.scenario import Scenario
-from sim.model.function import Function, FunctionProfile
-from sim.model.runtime import BuiltinRuntime, CustomRuntime
-from sim.metrics import SimulationMetrics
-from sim.core.simulation import Simulation
-from sim.model.container import ContainerState
-from sim.model.request import RequestStatus
-from sim.model.infrastructure import Infrastructure
-from sim.observer import Notification, NotificationType, SimulationError, observer
-from sim.__main__ import main
-from sim.utils.welford import TimedWelford, Welford
+from simulator.__main__ import main
+from simulator.core.simulation import Simulation
+from simulator.io.scenario import Scenario
+from simulator.metrics import SimulationMetrics
+from simulator.model.execution.container import ContainerState
+from simulator.model.execution.function import Function, FunctionProfile
+from simulator.model.execution.request import RequestStatus
+from simulator.model.execution.runtime import BuiltinRuntime, CustomRuntime
+from simulator.model.topology.infrastructure import Infrastructure
+from simulator.observer import Notification, NotificationType, SimulationError, observer
+from simulator.utils.welford import TimedWelford, Welford
 
 
 def profiled_function(name, arrival_rate, service_rate, first_arrival_time=0):
@@ -101,7 +101,7 @@ class SimulationTest(unittest.TestCase):
     def test_cli_prints_one_structured_report_and_keeps_logs_separate(self):
         root = Path(__file__).resolve().parents[1]
         scenario = 'examples/scenarios/startup.toml'
-        command = [sys.executable, '-m', 'sim', scenario, '--arrivals', '100']
+        command = [sys.executable, '-m', 'simulator', scenario, '--arrivals', '100']
         for level in ('WARNING', 'INFO'):
             with self.subTest(level=level):
                 result = subprocess.run(
@@ -129,7 +129,7 @@ class SimulationTest(unittest.TestCase):
             patch('sys.argv', ['sim', 'scenario.toml', '--arrivals', '1']),
             patch.object(Scenario, 'load', return_value=scenario),
             patch.object(Infrastructure, 'submit', side_effect=failure),
-            self.assertLogs('sim.notifications', level='ERROR') as logs,
+            self.assertLogs('simulator.notifications', level='ERROR') as logs,
             self.assertRaises(SystemExit) as raised,
         ):
             main()

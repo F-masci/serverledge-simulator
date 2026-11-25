@@ -1,11 +1,11 @@
 import logging
 import unittest
 
-from sim.model.function import Function
-from sim.model.request import Request
-from sim.model.runtime import BuiltinRuntime
-from sim.observer import RequestArrived
-from sim.utils.logger import log_notification
+from simulator.model.execution.function import Function
+from simulator.model.execution.request import Request
+from simulator.model.execution.runtime import BuiltinRuntime
+from simulator.observer import RequestArrived
+from simulator.utils.logger import log_notification
 
 
 class NotificationLoggerTest(unittest.TestCase):
@@ -16,7 +16,7 @@ class NotificationLoggerTest(unittest.TestCase):
         request = Request(Function('hello', 128, 1, BuiltinRuntime('python314')))
         notification = WarningArrival('run', 0.0, request)
 
-        with self.assertLogs('sim.notifications', level='INFO') as logs:
+        with self.assertLogs('simulator.notifications', level='INFO') as logs:
             log_notification(notification)
 
         record, = logs.records

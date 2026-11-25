@@ -21,8 +21,7 @@ import sys
 import unittest
 
 import numpy as np
-
-from sim.random import RandomStreams, StreamKind, PoissonArrivalProcess, GammaServiceTime
+from simulator.random import RandomStreams, StreamKind, PoissonArrivalProcess, GammaServiceTime
 
 
 class RandomStreamsTest(unittest.TestCase):
@@ -61,7 +60,7 @@ class RandomStreamsTest(unittest.TestCase):
 
     def test_reproducible_across_processes_and_python_hash_seeds(self):
         """Processi con hash Python differenti ricostruiscono lo stesso flusso."""
-        code = ('import json; from sim.random import RandomStreams, StreamKind; '
+        code = ('import json; from simulator.random import RandomStreams, StreamKind; '
                 'print(json.dumps(RandomStreams(42).stream(StreamKind.SERVICE, "f").random(5).tolist()))')
         outputs = []
         for hash_seed in ('1', '999'):
