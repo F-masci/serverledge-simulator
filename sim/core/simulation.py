@@ -8,12 +8,12 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from sim.bindings import NodeBindings, RequestBindings
+from sim.bindings import ActuatorBindings, NodeBindings, RequestBindings
 from sim.io.scenario import Scenario
 from sim.model.container import DockerContainer
 from sim.model.events import (
     ArrivalEvent, CompletionEvent, ContainerCleanupEvent, ContainerReadyEvent,
-    RegionDeliveryEvent, ResponseEvent, ScheduledEvent,
+    NodeDrainedEvent, NodeProvisionedEvent, RegionDeliveryEvent, ResponseEvent, ScheduledEvent,
 )
 from sim.model.node import Node
 from sim.model.offloading import NodeScheduling
@@ -21,6 +21,7 @@ from sim.model.region import Region
 from sim.model.request import Request, RequestStatus
 from sim.observer import FinalStatistics
 from sim.observer.observer import Observer, observer as shared_observer
+from sim.random.streams import RandomStreams, StreamKind
 from sim.metrics import SimulationMetrics
 from sim.utils.report import format_metrics
 from sim.utils.validation import nonnegative_integer
@@ -28,6 +29,7 @@ from .engine import SimulationEngine
 
 if TYPE_CHECKING:
     from ray.rllib.core.rl_module.rl_module import RLModule
+    from sim.model.scaling.actuator import DrainingOp, ProvisioningOp
     from sim.scaler.rllib import RLlibPPOPolicy
 
 
@@ -114,10 +116,12 @@ class Simulation:
     def _build_regions(self, scenario: Scenario, *, scaler_agents: Mapping[str, 'RLlibPPOPolicy | RLModule'] | None = None) -> Mapping[str, Region]:
         """Costruisce tutte le regioni dello scenario con i binding dei nodi e configura gli scheduler."""
         node_bindings = self._build_node_bindings()
+        actuator_bindings = self._build_actuator_bindings()
         agents = scaler_agents or {}
         regions = {
             name: Region(
                 name, scenario=scenario, node_bindings=node_bindings,
+                actuator_bindings=actuator_bindings,
                 scaler_agent=agents.get(name),
             )
             for name in scenario.regions
@@ -338,7 +342,86 @@ class Simulation:
         self._ctx.engine.schedule_after(delay, delivery_event)
         return None
 
+    def _schedule_node_provisioning(
+        self, region: Region, ring_id: str, op: 'ProvisioningOp', boot_time_s: float,
+    ) -> None:
+        """
+        Pianifica il completamento del boot di un nodo avviato dall'attuatore.
+
+        Se `boot_time_s == 0`, completa l'operazione immediatamente nello stesso istante.
+        """
+        # Evento di provisioning che verrà eseguito dopo il tempo di boot.
+        event = NodeProvisionedEvent(ctx=self._ctx, region=region, ring_id=ring_id, op_id=op.op_id)
+        
+        # Se il tempo di boot è nullo, esegue immediatamente l'evento nello stesso istante simulato.
+        if boot_time_s == 0.0:
+            event.execute()
+        # Altrimenti pianifica l'evento dopo il tempo di boot specificato.
+        else:
+            self._ctx.engine.schedule_after(boot_time_s, event)
+
+    def _create_provisioned_node(self, region: Region, ring_id: str, node_name: str) -> Node:
+        """
+        Crea e configura un nodo appena avviato nel ring secondo i parametri dello scenario.
+
+        Callback invocata da `RegionActuator.complete_provisioning`.
+        """
+        scenario = self._ctx.scenario
+        infra = region.infrastructure
+        assert infra is not None
+        
+        # Crea un generatore di numeri casuali per il nodo.
+        streams = RandomStreams(scenario.seed)
+        eviction_rng = streams.stream(StreamKind.EVICTION, f'{region.name}/{ring_id}/{node_name}')
+
+        # Configura il nodo con i parametri dello scenario e lo registra nell'infrastruttura.
+        node = infra.create_node(
+            ring_id,
+            node_name,
+            idle_timeout=scenario.containers.idle_timeout,
+            queue_capacity=scenario.scheduler.queue_capacity,
+            eviction_rng=eviction_rng,
+        )
+
+        # Configura lo scheduler del nodo secondo i parametri dello scenario.
+        infra.configure_scheduler(
+            node,
+            NodeScheduling(
+                policy=scenario.scheduler.policy,
+                fallback_local=scenario.scheduler.fallback_local,
+                offloading_cache_validity_s=scenario.scheduler.offloading_cache_validity_s,
+            ),
+        )
+
+        return node
+
+    def _schedule_node_drain(
+        self, region: Region, ring_id: str, op: 'DrainingOp', shutdown_time_s: float,
+    ) -> None:
+        """
+        Pianifica lo spegnimento definitivo di un nodo che ha completato il drain.
+
+        Se `shutdown_time_s == 0`, spegne il nodo immediatamente nello stesso istante.
+        """
+        # Evento di spegnimento che verrà eseguito dopo il tempo di shutdown.
+        event = NodeDrainedEvent(ctx=self._ctx, region=region, ring_id=ring_id, op_id=op.op_id)
+
+        # Se il tempo di spegnimento è nullo, esegue immediatamente l'evento nello stesso istante simulato.
+        if shutdown_time_s == 0.0:
+            event.execute()
+        # Altrimenti pianifica l'evento dopo il tempo di spegnimento specificato.
+        else:
+            self._ctx.engine.schedule_after(shutdown_time_s, event)
+
     ## Binding ##
+
+    def _build_actuator_bindings(self) -> ActuatorBindings:
+        """Costruisce i binding di ciclo di vita per l'attuatore di scaling di ogni regione."""
+        return ActuatorBindings(
+            on_provision_started=self._schedule_node_provisioning,
+            on_provision_completed=self._create_provisioned_node,
+            on_drain_ready=self._schedule_node_drain,
+        )
 
     def _build_node_bindings(self) -> NodeBindings:
         """Costruisce i binding di ciclo di vita per ogni nodo creato."""

@@ -168,26 +168,27 @@ class TestActuatorAndLifecycle(unittest.TestCase):
         scaler = sim.regions['default'].scaler
         assert isinstance(scaler, PPOScaler)
         act = scaler.actuator
+        codec = scaler.controller.codec
 
-        self.assertEqual(act.action_dim, 5)
-        self.assertEqual(act.decode_action(0), (ScalingActionKind.HOLD, None))
-        self.assertEqual(act.decode_action(1), (ScalingActionKind.SCALE_OUT, 'edge-x86'))
-        self.assertEqual(act.decode_action(2), (ScalingActionKind.SCALE_IN, 'edge-x86'))
-        self.assertEqual(act.decode_action(3), (ScalingActionKind.SCALE_OUT, 'edge-arm'))
-        self.assertEqual(act.decode_action(4), (ScalingActionKind.SCALE_IN, 'edge-arm'))
+        self.assertEqual(codec.action_dim, 5)
+        self.assertEqual(codec.decode(0), (ScalingActionKind.HOLD, None))
+        self.assertEqual(codec.decode(1), (ScalingActionKind.SCALE_OUT, 'edge-x86'))
+        self.assertEqual(codec.decode(2), (ScalingActionKind.SCALE_IN, 'edge-x86'))
+        self.assertEqual(codec.decode(3), (ScalingActionKind.SCALE_OUT, 'edge-arm'))
+        self.assertEqual(codec.decode(4), (ScalingActionKind.SCALE_IN, 'edge-arm'))
 
-        mask = act.action_mask(now=0.0)
+        mask = codec.action_mask(scaler.accounting.zone_observation(0.0))
         self.assertEqual(mask.tolist(), [True, True, False, False, True])
 
         cmd_out = ScalingCommand('c1', 1, 'edge-x86', ScalingActionKind.SCALE_OUT, act.state_version, 0.0)
-        res = act.execute(cmd_out, sim._ctx)
+        res = act.execute(cmd_out, now=0.0)
         self.assertEqual(res.outcome, CommandOutcome.IN_PROGRESS)
         self.assertEqual(act.rings['edge-x86'].provisioning_count, 1)
         self.assertEqual(act.rings['edge-x86'].remaining_quota, 0)
-        self.assertFalse(act.action_mask(now=0.0)[1])
+        self.assertFalse(codec.action_mask(scaler.accounting.zone_observation(0.0))[1])
 
         cmd_dup = ScalingCommand('c2', 2, 'edge-x86', ScalingActionKind.SCALE_OUT, act.state_version, 0.0)
-        res_dup = act.execute(cmd_dup, sim._ctx)
+        res_dup = act.execute(cmd_dup, now=0.0)
         self.assertEqual(res_dup.outcome, CommandOutcome.REJECTED)
         self.assertEqual(act.rejected_commands, 1)
 
@@ -205,7 +206,6 @@ class TestActuatorAndLifecycle(unittest.TestCase):
         region = sim.regions['default']
         scaler = region.scaler
         assert isinstance(scaler, PPOScaler)
-        scaler.accounting.bind_context(sim._ctx)
         sim._ctx.observer.subscribe(scaler.accounting.on_notification, propagate_errors=True)
 
         ring = region.infrastructure.rings['edge-x86']  # type: ignore[union-attr]
@@ -223,14 +223,14 @@ class TestActuatorAndLifecycle(unittest.TestCase):
         self.assertIs(ring_act.select_scale_in_candidate(), node_b)
 
         cmd_b = ScalingCommand('c1', 1, 'edge-x86', ScalingActionKind.SCALE_IN, 0, 0.0)
-        res_b = scaler.actuator.execute(cmd_b, sim._ctx)
+        res_b = scaler.actuator.execute(cmd_b, now=0.0)
         self.assertEqual(res_b.node_name, 'x86-b')
         self.assertEqual(res_b.outcome, CommandOutcome.COMPLETED)
         self.assertEqual(ring_act.draining_count, 0)
         self.assertEqual(ring_act.scale_in_completed, 1)
 
         cmd_a = ScalingCommand('c2', 2, 'edge-x86', ScalingActionKind.SCALE_IN, 1, 0.0)
-        res_a = scaler.actuator.execute(cmd_a, sim._ctx)
+        res_a = scaler.actuator.execute(cmd_a, now=0.0)
         self.assertEqual(res_a.node_name, 'x86-a')
         self.assertEqual(res_a.outcome, CommandOutcome.IN_PROGRESS)
         self.assertNotIn(node_a, ring)

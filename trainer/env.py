@@ -140,8 +140,9 @@ class ServerledgeScalingEnv(gym.Env):
         scaler.attach(sim._ctx, schedule_steps=False)
 
         self._sim = sim
+        zone_obs = scaler.accounting.zone_observation(sim.now)
         ring_obs, obs_vec = scaler.accounting.observe(sim.now)
-        mask = scaler.actuator.action_mask(sim.now)
+        mask = scaler.controller.codec.action_mask(zone_obs)
         info = {
             'sim_time_s': sim.now,
             'seed': run_seed,
@@ -164,7 +165,7 @@ class ServerledgeScalingEnv(gym.Env):
         assert scaler is not None
 
         action_idx = int(action)
-        action_kind, ring_id = scaler.actuator.decode_action(action_idx)
+        action_kind, ring_id = scaler.controller.codec.decode(action_idx)
         self._step_count += 1
 
         now = ctx.now
@@ -196,7 +197,7 @@ class ServerledgeScalingEnv(gym.Env):
         # Chiude l'intervallo [now, ctx.now] e calcola K_t, D_t e reward a due termini.
         interval = scaler.accounting.close_interval(ctx.now, record_step=True)
 
-        mask = scaler.actuator.action_mask(ctx.now)
+        mask = scaler.controller.codec.action_mask(scaler.accounting.zone_observation(ctx.now))
         terminated = calendar_exhausted
         truncated = (
             not terminated

@@ -18,7 +18,7 @@ from .scaling import Scaler
 if TYPE_CHECKING:
     from numpy.random import Generator
     from ray.rllib.core.rl_module.rl_module import RLModule
-    from sim.bindings import NodeBindings
+    from sim.bindings import ActuatorBindings, NodeBindings
     from sim.io.scenario import Scenario
     from sim.scaler.rllib import RLlibPPOPolicy
     from .ring import ArchitectureRing
@@ -46,6 +46,7 @@ class Region:
         *,
         scenario: 'Scenario | None' = None,
         node_bindings: 'NodeBindings | None' = None,
+        actuator_bindings: 'ActuatorBindings | None' = None,
         scaler_agent: 'RLlibPPOPolicy | RLModule | None' = None,
     ) -> None:
         # Identificativo univoco della regione
@@ -71,7 +72,7 @@ class Region:
                 self._infrastructure = self._build_infrastructure(
                     scenario, node_bindings=node_bindings,
                 )
-                self._scaler = self._build_scaler(scenario, agent=scaler_agent)
+                self._scaler = self._build_scaler(scenario, actuator_bindings=actuator_bindings, agent=scaler_agent)
 
     ### Identification ###
 
@@ -208,6 +209,7 @@ class Region:
         self,
         scenario: 'Scenario',
         *,
+        actuator_bindings: 'ActuatorBindings | None' = None,
         agent: 'RLlibPPOPolicy | RLModule | None' = None,
     ) -> 'Scaler | None':
         """Costruisce lo scaler regionale se configurato sulla regione o sullo scenario."""
@@ -238,6 +240,7 @@ class Region:
             scaler_config,
             region=self,
             ring_configs=ring_configs,
+            actuator_bindings=actuator_bindings,
             seed=scenario.seed,
             stream_id=stream_id,
             agent=agent,

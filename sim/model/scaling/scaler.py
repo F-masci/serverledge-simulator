@@ -16,6 +16,7 @@ from sim.scaler.core import ZoneController
 
 if TYPE_CHECKING:
     from ray.rllib.core.rl_module.rl_module import RLModule
+    from sim.bindings import ActuatorBindings
     from sim.core.simulation import SimulationContext
     from sim.model.region import Region
     from sim.scaler.rllib import RLlibPPOPolicy
@@ -38,6 +39,7 @@ class Scaler:
         region: 'Region',
         policy: ScalingPolicy,
         ring_configs: Mapping[str, RingScalingConfig] | None = None,
+        actuator_bindings: 'ActuatorBindings | None' = None,
         seed: int = 12345,
         stream_id: str | None = None,
     ) -> None:
@@ -48,6 +50,8 @@ class Scaler:
 
         # Inizializza i componenti principali: actuator, accounting e controller.
         self._actuator = RegionActuator(region, ring_configs or {}, config.default_ring, rng=self._rng)
+        if actuator_bindings is not None:
+            actuator_bindings.bind(self._actuator)
         self._accounting = RegionAccounting(
             self._actuator,
             config.reward,
@@ -82,6 +86,7 @@ class Scaler:
         *,
         region: 'Region',
         ring_configs: Mapping[str, RingScalingConfig] | None = None,
+        actuator_bindings: 'ActuatorBindings | None' = None,
         seed: int = 12345,
         stream_id: str | None = None,
         agent: 'RLlibPPOPolicy | RLModule | None' = None,
@@ -96,6 +101,7 @@ class Scaler:
         if config.mode is ScalerMode.PPO:
             return PPOScaler(
                 config, region=region, ring_configs=ring_configs,
+                actuator_bindings=actuator_bindings,
                 seed=seed, stream_id=stream_id, agent=agent,
             )
 
@@ -123,7 +129,6 @@ class Scaler:
         """Collega la contabilità all'observer della replica e avvia il ciclo periodico."""
         if self._attached:
             raise RuntimeError(f'Scaler della regione {self._region.name} già collegato')
-        self._accounting.bind_context(ctx)
         self._unsubscribe = ctx.observer.subscribe(
             self._accounting.on_notification, propagate_errors=True,
         )
@@ -140,7 +145,7 @@ class Scaler:
     ) -> ScalingResult:
         """Attua un comando sul simulatore e pubblica la notifica `ScalerDecision`."""
         self._accounting.advance_to(ctx.now)
-        result = self._actuator.execute(command, ctx)
+        result = self._actuator.execute(command, ctx.now)
         self._last_result = result
         self._has_pending_interval = True
 
@@ -176,17 +181,17 @@ class Scaler:
         ctx.engine.schedule_after(self._config.interval_s, ScalerStepEvent(ctx=ctx, region=self._region))
         return result
 
-    def on_node_provisioned(self, ring_id: str, op_id: str, ctx: 'SimulationContext') -> None:
+    def on_node_provisioned(self, ring_id: str, op_id: str, now: float) -> None:
         """Gestisce il completamento o fallimento del boot di un nodo."""
-        self._accounting.advance_to(ctx.now)
-        self._actuator.complete_provisioning(ring_id, op_id, ctx)
+        self._accounting.advance_to(now)
+        self._actuator.complete_provisioning(ring_id, op_id)
 
-    def on_node_drained(self, ring_id: str, op_id: str, ctx: 'SimulationContext') -> None:
+    def on_node_drained(self, ring_id: str, op_id: str, now: float) -> None:
         """Gestisce il rilascio definitivo di un nodo al termine del drain."""
-        self._accounting.advance_to(ctx.now)
-        node = self._actuator.complete_drain(ring_id, op_id, ctx)
+        self._accounting.advance_to(now)
+        node = self._actuator.complete_drain(ring_id, op_id)
         if node is not None:
-            self._accounting.on_node_drain_completed(node.key, ctx.now)
+            self._accounting.on_node_drain_completed(node.key, now)
 
     def finalize(self, now: float, *, truncated: bool = True) -> None:
         """Chiude l'eventuale intervallo residuo al termine della replica."""
@@ -246,6 +251,7 @@ class PPOScaler(Scaler):
         *,
         region: 'Region',
         ring_configs: Mapping[str, RingScalingConfig] | None = None,
+        actuator_bindings: 'ActuatorBindings | None' = None,
         seed: int = 12345,
         stream_id: str | None = None,
         agent: 'RLlibPPOPolicy | RLModule | None' = None,
@@ -278,6 +284,7 @@ class PPOScaler(Scaler):
         self._policy = policy
         super().__init__(
             config, region=region, policy=policy, ring_configs=ring_configs,
+            actuator_bindings=actuator_bindings,
             seed=seed, stream_id=stream_id,
         )
 

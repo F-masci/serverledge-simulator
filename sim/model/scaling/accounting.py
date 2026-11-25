@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -16,9 +15,6 @@ from .actuator import RegionActuator
 from sim.scaler.config import RewardConfig
 from sim.scaler.contracts import FEATURES_PER_RING, RingObservation, ZoneObservation
 from sim.scaler.core import ObservationEncoder, RewardCalculator
-
-if TYPE_CHECKING:
-    from sim.core.simulation import SimulationContext
 
 _JOULES_PER_KWH = 3_600_000.0
 
@@ -77,7 +73,6 @@ class RegionAccounting:
         self._reward_config = reward_config
         self._interval_s = interval_s
         self._history_length = history_length
-        self._ctx: 'SimulationContext | None' = None
 
         # Istante di avanzamento degli integrali continui e inizio intervallo corrente.
         self._last_time_s = 0.0
@@ -133,10 +128,6 @@ class RegionAccounting:
     def obs_dim(self) -> int:
         """Dimensione del vettore di osservazione concatenato sullo storico breve."""
         return self._encoder.obs_dim
-
-    def bind_context(self, ctx: 'SimulationContext') -> None:
-        """Collega il contesto di simulazione per gestire il completamento del drain."""
-        self._ctx = ctx
 
     ### Continuous-Time Integration ###
 
@@ -224,8 +215,7 @@ class RegionAccounting:
                 state = self._node_power.get(notification.node.key)
                 if state is not None and notification.resources is not None:
                     state.used_cpus = notification.resources.used_cpus
-                if self._ctx is not None:
-                    self._actuator.on_node_activity_changed(notification.node, self._ctx)
+                self._actuator.check_node_drain(notification.node, now)
 
             case RequestArrived():
                 if notification.region is None or notification.region.name != region_name:
@@ -270,12 +260,11 @@ class RegionAccounting:
                     self.advance_to(now)
                     self._pending.pop(notification.request.id, None)
                 if (
-                    self._ctx is not None
-                    and notification.node is not None
+                    notification.node is not None
                     and notification.region is not None
                     and notification.region.name == region_name
                 ):
-                    self._actuator.on_node_activity_changed(notification.node, self._ctx)
+                    self._actuator.check_node_drain(notification.node, now)
 
             case RequestRejected():
                 if notification.request.id not in self._pending and (

@@ -34,7 +34,7 @@ class NodeProvisionedEvent(Event):
         """Notifica allo scaler regionale la fine del boot del nodo."""
         scaler = self.region.scaler
         if scaler is not None:
-            scaler.on_node_provisioned(self.ring_id, self.op_id, self.ctx)
+            scaler.on_node_provisioned(self.ring_id, self.op_id, self.ctx.now)
 
 
 @dataclass(frozen=True)
@@ -49,4 +49,4 @@ class NodeDrainedEvent(Event):
         """Notifica allo scaler regionale il rilascio definitivo del nodo drenato."""
         scaler = self.region.scaler
         if scaler is not None:
-            scaler.on_node_drained(self.ring_id, self.op_id, self.ctx)
+            scaler.on_node_drained(self.ring_id, self.op_id, self.ctx.now)

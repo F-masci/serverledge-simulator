@@ -19,3 +19,6 @@ environment.yml
 
 # Documentazione locale
 /refs/
+
+# Addestramento
+checkpoints/
