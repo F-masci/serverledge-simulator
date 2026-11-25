@@ -13,7 +13,7 @@ from gymnasium import spaces
 from simulator.io.scaler import ScalerConfig, ScalerMode
 from simulator.io.scenario import Scenario
 from simulator.model.events import Event
-from simulator.scaler.contracts import FEATURES_PER_RING, ScalingCommand
+from scaler.contracts import FEATURES_PER_RING, ScalingCommand
 
 if TYPE_CHECKING:
     from simulator.core.simulation import Simulation

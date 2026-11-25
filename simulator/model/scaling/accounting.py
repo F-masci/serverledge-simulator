@@ -10,9 +10,9 @@ from simulator.observer.notifications import (
     RequestArrived, RequestCompleted, RequestDelivered, RequestForwarded, RequestQueued,
     RequestRejected,
 )
-from simulator.scaler.config import RewardConfig
-from simulator.scaler.contracts import FEATURES_PER_RING, RingObservation, ZoneObservation
-from simulator.scaler.core import ObservationEncoder, RewardCalculator
+from scaler.config import RewardConfig
+from scaler.contracts import FEATURES_PER_RING, RingObservation, ZoneObservation
+from scaler.core import ObservationEncoder, RewardCalculator
 
 from .actuator import RegionActuator
 

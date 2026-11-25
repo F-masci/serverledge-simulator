@@ -8,8 +8,8 @@ Esempio TOML nello scenario (globale `[scaler]` o per regione `[regions.<nome>.s
     history_length = 1       # opzionale (default: 1, passi impilati nell'osservazione)
 
     # Sottosezioni opzionali:
-    # [regions.edge.scaler.reward]       (vedi simulator/scaler/config/reward.py)
-    # [regions.edge.scaler.ppo]          (vedi simulator/scaler/config/ppo.py)
+    # [regions.edge.scaler.reward]       (vedi scaler/config/reward.py)
+    # [regions.edge.scaler.ppo]          (vedi scaler/config/ppo.py)
     # [regions.edge.scaler.default_ring] (vedi simulator/io/scaler/ring.py)
 """
 
@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from simulator.scaler.config import PPOConfig, RewardConfig
+from scaler.config import PPOConfig, RewardConfig
 from simulator.utils.validation import positive_integer, positive_number
 
 from .ring import RingScalingConfig

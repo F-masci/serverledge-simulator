@@ -9,7 +9,7 @@ from ray.rllib.algorithms.ppo import PPOConfig as RLlibPPOConfig
 from ray.rllib.core.rl_module.default_model_config import DefaultModelConfig
 from ray.rllib.core.rl_module.rl_module import RLModuleSpec
 from simulator.io.scenario import Scenario
-from simulator.scaler.rllib import ActionMaskingPPOTorchRLModule
+from scaler.rllib import ActionMaskingPPOTorchRLModule
 
 from .env import ServerledgeScalingEnv
 

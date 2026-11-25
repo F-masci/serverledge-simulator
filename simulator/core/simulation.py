@@ -31,7 +31,7 @@ from .engine import SimulationEngine
 if TYPE_CHECKING:
     from ray.rllib.core.rl_module.rl_module import RLModule
     from simulator.model.scaling.actuator import DrainingOp, ProvisioningOp
-    from simulator.scaler.rllib import RLlibPPOPolicy
+    from scaler.rllib import RLlibPPOPolicy
 
 
 @dataclass(frozen=True)

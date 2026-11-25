@@ -13,7 +13,7 @@ Esempio TOML nello scenario (tutti i parametri sono opzionali):
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from simulator.utils.validation import nonnegative_number, positive_number
+from ._validation import nonnegative_number, positive_number
 
 
 @dataclass(frozen=True)

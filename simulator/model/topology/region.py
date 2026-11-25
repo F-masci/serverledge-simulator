@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from ray.rllib.core.rl_module.rl_module import RLModule
     from simulator.bindings import ActuatorBindings, NodeBindings
     from simulator.io.scenario import Scenario
-    from simulator.scaler.rllib import RLlibPPOPolicy
+    from scaler.rllib import RLlibPPOPolicy
     from .ring import ArchitectureRing
 
 

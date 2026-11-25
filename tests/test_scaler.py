@@ -11,7 +11,7 @@ from simulator.io.scenario import Scenario
 from simulator.model.scaling import PPOScaler
 from simulator.observer.notifications import NotificationType
 from simulator.random.streams import RandomStreams, StreamKind
-from simulator.scaler import (
+from scaler import (
     CommandOutcome, FEATURES_PER_RING, PPOConfig, RLlibPPOPolicy,
     RewardConfig, RingObservation, ScalingActionKind, ScalingBackend, ScalingCommand,
     ScalingResult, ZoneController, ZoneObservation, load_rllib_module,

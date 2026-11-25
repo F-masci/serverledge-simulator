@@ -9,8 +9,8 @@ from typing import Any, ClassVar, Never, TYPE_CHECKING
 from simulator.io.scaler import RingScalingConfig, ScalerConfig, ScalerMode
 from simulator.model.events.scaler import ScalerStepEvent
 from simulator.random.streams import RandomStreams, StreamKind
-from simulator.scaler.contracts import ScalingCommand, ScalingPolicy, ScalingResult, ZoneObservation
-from simulator.scaler.core import ZoneController
+from scaler.contracts import ScalingCommand, ScalingPolicy, ScalingResult, ZoneObservation
+from scaler.core import ZoneController
 
 from .accounting import IntervalSnapshot, RegionAccounting
 from .actuator import RegionActuator
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from simulator.bindings import ActuatorBindings
     from simulator.core.simulation import SimulationContext
     from simulator.model.topology.region import Region
-    from simulator.scaler.rllib import RLlibPPOPolicy
+    from scaler.rllib import RLlibPPOPolicy
 
 
 class Scaler:
@@ -257,8 +257,8 @@ class PPOScaler(Scaler):
         stream_id: str | None = None,
         agent: 'RLlibPPOPolicy | RLModule | None' = None,
     ) -> None:
-        from simulator.scaler.contracts import FEATURES_PER_RING
-        from simulator.scaler.rllib import RLlibPPOPolicy
+        from scaler.contracts import FEATURES_PER_RING
+        from scaler.rllib import RLlibPPOPolicy
 
         infra = region.infrastructure
         assert infra is not None

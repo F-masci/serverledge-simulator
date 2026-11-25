@@ -12,7 +12,7 @@ from numpy.random import Generator
 from simulator.io.scaler import RingScalingConfig
 from simulator.model.topology.node import Node
 from simulator.model.topology.ring import ArchitectureRing
-from simulator.scaler.contracts import (
+from scaler.contracts import (
     CommandOutcome, ScalingActionKind, ScalingCommand, ScalingResult,
 )
 
