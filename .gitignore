@@ -12,7 +12,6 @@ coverage.xml
 htmlcov/
 mutants/
 .mutmut-cache
-mutation-issues.json
 mutation-report.json
 mutation-report.md
 
