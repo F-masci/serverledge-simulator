@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from logging import ERROR
+from typing import ClassVar
 
 from .notification import Notification, NotificationType
 
@@ -10,8 +11,8 @@ from .notification import Notification, NotificationType
 class SimulationError(Notification):
     """Descrive un errore del calendario o del caricamento con dati serializzabili."""
 
-    type = NotificationType.SIMULATION_ERROR
-    level = ERROR
+    type: ClassVar[NotificationType] = NotificationType.SIMULATION_ERROR
+    level: ClassVar[int] = ERROR
 
     exception: Exception = field(repr=False)
     failed_event: str

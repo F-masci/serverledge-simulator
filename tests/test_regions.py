@@ -235,5 +235,6 @@ class RegionsTest(unittest.TestCase):
             ({'regions': {'edge': {'offload_latency_by_source_s': {'other': -1}}, 'other': {}}},
              'offload_latency_by_source_s'),
         ):
+            kwargs = {'regions': {'edge': simulated_region()}} | options
             with self.subTest(field=field), self.assertRaisesRegex(ValueError, field):
-                Scenario([FUNCTION], **({'regions': {'edge': simulated_region()}} | options))
+                Scenario([FUNCTION], **kwargs)

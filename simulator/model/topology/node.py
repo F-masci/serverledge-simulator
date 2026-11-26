@@ -492,7 +492,7 @@ class Node:
 
         return reclaimable
 
-    def creation_succeeded(self, container: DockerContainer, now: float) -> None:
+    def creation_succeeded(self, container: DockerContainer) -> None:
         """Segnala che la creazione del container è riuscita e lo aggiunge al pool."""
         if container not in self._pending:
             raise ValueError('Container non in pending')

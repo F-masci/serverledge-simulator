@@ -88,9 +88,10 @@ class RandomStreamsTest(unittest.TestCase):
                     RandomStreams(value)
                 with self.assertRaises(ValueError):
                     RandomStreams(1, value)
+        streams = RandomStreams(1)
         for kind, name in ((1, 'f'), (StreamKind.ARRIVAL, '')):
             with self.assertRaises(ValueError):
-                RandomStreams(1).stream(kind, name)
+                streams.stream(kind, name)
 
 
 class DistributionsTest(unittest.TestCase):
@@ -116,7 +117,9 @@ class DistributionsTest(unittest.TestCase):
             arrivals = PoissonArrivalProcess(2, streams, 'f/main')
             service = GammaServiceTime(1, 1, streams, 'f')
             return [(arrivals.next_iat(), service.sample()) for _ in range(10)]
-        self.assertEqual(sample(), sample())
+        first = sample()
+        second = sample()
+        self.assertEqual(first, second)
 
     def test_invalid_distribution_parameters_are_rejected(self):
         """Niente distribuzioni con tassi, medie o SCV nulli, negativi o non finiti."""

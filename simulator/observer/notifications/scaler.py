@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from logging import INFO
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from .notification import Notification, NotificationType
 
@@ -14,8 +14,8 @@ if TYPE_CHECKING:
 class ScalerDecision(Notification):
     """Notifica una decisione dello Zone Controller regionale con reward e costi dell'intervallo."""
 
-    type = NotificationType.SCALER_DECISION
-    level = INFO
+    type: ClassVar[NotificationType] = NotificationType.SCALER_DECISION
+    level: ClassVar[int] = INFO
 
     run_id: str
     sim_time_s: float

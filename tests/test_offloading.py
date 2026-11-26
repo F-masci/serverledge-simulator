@@ -28,7 +28,7 @@ class OffloadingTest(unittest.TestCase):
         origin = self.node('origin', queue_capacity=1)
         active, waiting = (Request(self.function, can_offload=True) for _ in range(2))
         self.assertIs(self.infrastructure.submit(active, node=origin), origin)
-        origin.creation_succeeded(active.container, 0)
+        origin.creation_succeeded(active.container)
         self.assertIs(self.infrastructure.submit(waiting, node=origin), origin)
         self.assertIs(waiting.status, RequestStatus.QUEUED)
         self.assertIsNone(waiting.to_dict()['offloaded_from_node_id'])

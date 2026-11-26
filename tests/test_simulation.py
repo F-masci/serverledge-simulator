@@ -176,8 +176,9 @@ class SimulationTest(unittest.TestCase):
         failure = RuntimeError('metriche non aggiornate')
         scenario = Scenario((profiled_function('hello', 1, 1),))
         with patch.object(SimulationMetrics, 'on_notification', side_effect=failure):
+            simulation = Simulation(scenario)
             with self.assertRaises(RuntimeError) as raised:
-                Simulation(scenario).run(arrivals=1)
+                simulation.run(arrivals=1)
         self.assertIs(raised.exception, failure)
 
     def test_metrics_collectors_can_be_inspected_printed_and_serialized_individually(self):

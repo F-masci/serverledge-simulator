@@ -247,24 +247,32 @@ class _InvocationMetricsCollector(MetricCollector):
                 self._external_arrivals[region.name] += 1
                 self._by_region.setdefault(region.name, _InvocationMetrics())
             case RequestForwarded(source_region=source, region=destination) if destination is not None:
-                self._offloads[source.name, destination.name] += 1
-                for stats in self._scopes(notification.function.name, destination.name):
-                    stats.in_transit += 1
-                    stats.offloads += 1
+                self._record_forwarded(notification.function.name, source.name, destination.name)
             case RequestDelivered():
-                region_name = notification.region.name if notification.region is not None else None
-                for stats in self._scopes(notification.function.name, region_name):
-                    stats.in_transit -= 1
+                self._adjust_in_transit(notification, -1)
             case RequestRejectionReturning():
-                region_name = notification.region.name if notification.region is not None else None
-                for stats in self._scopes(notification.function.name, region_name):
-                    stats.in_transit += 1
+                self._adjust_in_transit(notification, 1)
             case RequestQueued() | RequestDequeued() | RequestAccepted() | RequestRejected() | RequestCompleted():
                 if isinstance(notification, RequestRejected) and notification.request.return_delay > 0:
-                    region_name = notification.region.name if notification.region is not None else None
-                    for stats in self._scopes(notification.function.name, region_name):
-                        stats.in_transit -= 1
+                    self._adjust_in_transit(notification, -1)
                 self._record_outcome(notification)
+
+    def _record_forwarded(self, function_name: str, source_name: str, destination_name: str) -> None:
+        """Registra un inoltro interregionale e incrementa il contatore in transito."""
+        self._offloads[source_name, destination_name] += 1
+        for stats in self._scopes(function_name, destination_name):
+            stats.in_transit += 1
+            stats.offloads += 1
+
+    def _adjust_in_transit(
+        self,
+        notification: RequestDelivered | RequestRejectionReturning | RequestRejected,
+        delta: int,
+    ) -> None:
+        """Aggiorna il numero di richieste in transito negli scope della notifica."""
+        region_name = notification.region.name if notification.region is not None else None
+        for stats in self._scopes(notification.function.name, region_name):
+            stats.in_transit += delta
 
     def _track_intra_region_offload(
         self, event: RequestQueued | RequestAccepted | RequestRejected,

@@ -8,6 +8,9 @@ if TYPE_CHECKING:
     from ..observer import FinalStatistics
 
 
+_MEAN_RESPONSE_LABEL = 'Risposta media'
+
+
 ##########################
 ### Formatting helpers ###
 ##########################
@@ -82,7 +85,7 @@ def format_metrics(metrics: dict) -> str:
             ('Throughput', _number(total['throughput_rps'], ' req/s')),
         )),
         _section('Tempi e latenze', (
-            ('Risposta media', _seconds(total['mean_response_time_s'])),
+            (_MEAN_RESPONSE_LABEL, _seconds(total['mean_response_time_s'])),
             ('  Min', _seconds(rt_pct['min'])),
             ('  p50', _seconds(rt_pct['p50'])),
             ('  p90', _seconds(rt_pct['p90'])),
@@ -119,7 +122,7 @@ def format_metrics(metrics: dict) -> str:
     if metrics['by_function']:
         sections.append(_table(
             'Invocazioni per funzione',
-            ('Funzione', 'Arrivi', 'Completate', 'Rifiutate', 'Pendenti', 'Cold %', 'Risposta media', 'p95'),
+            ('Funzione', 'Arrivi', 'Completate', 'Rifiutate', 'Pendenti', 'Cold %', _MEAN_RESPONSE_LABEL, 'p95'),
             (
                 (
                     name,
@@ -175,7 +178,7 @@ def format_metrics(metrics: dict) -> str:
     if ring_rows:
         sections.append(_table(
             'Metriche per ring',
-            ('Regione', 'Ring', 'Nodi', 'Accettate', 'Rifiutate', 'Cold %', 'CPU media', 'RAM busy', 'Bilanc.', 'Risposta media'),
+            ('Regione', 'Ring', 'Nodi', 'Accettate', 'Rifiutate', 'Cold %', 'CPU media', 'RAM busy', 'Bilanc.', _MEAN_RESPONSE_LABEL),
             ring_rows,
         ))
 

@@ -92,26 +92,49 @@ class Scenario:
         infrastructure: Mapping[str, object] | None, invocation: _InvocationConfig,
     ) -> None:
         """Valida la topologia regionale e registra la configurazione di ingresso."""
-
-        # Se manca la sezione regions, usa l'infrastruttura come unica regione.
         if primary_region is not None:
             primary_region = nonempty_string(primary_region, 'primary_region')
+        configured, primary = self._parse_regions_map(regions, primary_region, infrastructure)
+
+        # Verifica la regione primaria e la regione di ingresso delle invocazioni.
+        self._validate_entry_region(configured, primary, invocation)
+
+        # Le latenze per origine e le destinazioni remote devono indicare altre regioni censite.
+        self._validate_region_references(configured)
+
+        # Espone la configurazione regionale in sola lettura.
+        object.__setattr__(self, 'primary_region', primary)
+        object.__setattr__(self, 'regions', MappingProxyType(configured))
+        object.__setattr__(self, 'invocation', invocation)
+
+    @staticmethod
+    def _parse_regions_map(
+        regions: Mapping[str, object] | None,
+        primary_region: str | None,
+        infrastructure: Mapping[str, object] | None,
+    ) -> tuple[dict[str, _RegionConfig], str]:
+        """Costruisce la mappa delle regioni e determina la regione primaria."""
         if regions is None:
             primary = primary_region or 'default'
             infrastructure_config = _InfrastructureConfig.parse(infrastructure)
-            configured = {primary: _RegionConfig(infrastructure=infrastructure_config)}
-        else:
-            if infrastructure is not None:
-                raise ValueError('Con regions, dichiarare infrastructure dentro ogni regione')
-            if not isinstance(regions, Mapping) or not regions:
-                raise ValueError('regions deve essere una tabella di regioni non vuota')
-            configured = {}
-            for name, definition in regions.items():
-                name = nonempty_string(name, 'regions (nome)')
-                configured[name] = _RegionConfig.parse(name, definition)
-            primary = primary_region or next(iter(configured))
+            return {primary: _RegionConfig(infrastructure=infrastructure_config)}, primary
 
-        # Verifica la regione primaria e la regione di ingresso delle invocazioni.
+        if infrastructure is not None:
+            raise ValueError('Con regions, dichiarare infrastructure dentro ogni regione')
+        if not isinstance(regions, Mapping) or not regions:
+            raise ValueError('regions deve essere una tabella di regioni non vuota')
+
+        configured = {
+            nonempty_string(name, 'regions (nome)'): _RegionConfig.parse(nonempty_string(name, 'regions (nome)'), definition)
+            for name, definition in regions.items()
+        }
+        return configured, primary_region or next(iter(configured))
+
+    @staticmethod
+    def _validate_entry_region(
+        configured: Mapping[str, _RegionConfig], primary: str, invocation: _InvocationConfig,
+    ) -> None:
+        """Verifica che la regione primaria e la regione di ingresso siano valide."""
         if primary not in configured:
             raise ValueError(f'primary_region sconosciuta: {primary}')
 
@@ -121,75 +144,77 @@ class Scenario:
         if configured[entry].infrastructure is None and invocation.entry_node:
             raise ValueError(f'La regione {entry} accetta invocazioni a livello di regione')
 
-        # Le latenze per origine e le destinazioni remote devono indicare altre regioni censite.
+    @classmethod
+    def _validate_region_references(cls, configured: Mapping[str, _RegionConfig]) -> None:
+        """Verifica che latenze sorgente e destinazioni remote puntino ad altre regioni censite."""
         for name, region in configured.items():
             for source in region.offload_latency_by_source_s:
                 if source not in configured or source == name:
-                    raise ValueError(f"regions.{name}.offload_latency_by_source_s richiede un'altra regione censita: {source}")
-            if region.infrastructure is None:
-                continue
-            for ring in region.infrastructure.rings:
-                for node in ring.nodes:
-                    remote = node.remote_region
-                    if remote is not None and (remote not in configured or remote == name):
-                        raise ValueError(f"node.remote_region deve indicare un'altra regione censita: {remote}")
+                    raise ValueError(
+                        f"regions.{name}.offload_latency_by_source_s richiede un'altra regione censita: {source}"
+                    )
+            if region.infrastructure is not None:
+                cls._validate_node_remote_regions(name, region.infrastructure, configured)
 
-        # Espone la configurazione regionale in sola lettura.
-        object.__setattr__(self, 'primary_region', primary)
-        object.__setattr__(self, 'regions', MappingProxyType(configured))
-        object.__setattr__(self, 'invocation', invocation)
+    @staticmethod
+    def _validate_node_remote_regions(
+        region_name: str, infrastructure: _InfrastructureConfig, configured: Mapping[str, _RegionConfig],
+    ) -> None:
+        """Verifica le destinazioni remote dichiarate sui nodi di una regione."""
+        for ring in infrastructure.rings:
+            for node in ring.nodes:
+                remote = node.remote_region
+                if remote is not None and (remote not in configured or remote == region_name):
+                    raise ValueError(f"node.remote_region deve indicare un'altra regione censita: {remote}")
 
     def _register_functions(
         self, definitions: Iterable[Function | Mapping[str, object]],
     ) -> OrderedDict[str, Function]:
         """Costruisce l'anagrafica e assegna i flussi di arrivo e servizio."""
-
-        # L'ordine delle funzioni conta anche quando si confrontano due scenari.
         registry: OrderedDict[str, Function] = OrderedDict()
-
-        # Una sola fabbrica per lo scenario assegna flussi distinti a ogni funzione.
         streams = RandomStreams(self.seed)
 
-        # Costruisce le funzioni e le registra con i campionatori.
         for index, definition in enumerate(definitions):
-
-            # Accetta anche modelli già costruiti e identifica le definizioni invalide.
-            if isinstance(definition, Function):
-                function = definition
-            else:
-                try:
-                    function_config = _FunctionConfig.parse(definition, startup_times=self.containers.startup_times)
-                    function = function_config.build_function()
-                except ValueError as error:
-                    raise ValueError(f'functions[{index}]: {error}') from error
-
-            # Ogni funzione deve avere un profilo e un nome univoco nel registro.
+            function = self._parse_function_definition(index, definition)
             profile = function.profile
             if not isinstance(profile, FunctionProfile):
                 raise ValueError(f'Profilo di simulazione mancante o non valido per {function.name}')
             if function.name in registry:
                 raise ValueError(f'Funzione già registrata: {function.name}')
 
-            # Anche i modelli passati direttamente usano il runtime configurato dallo scenario.
-            runtime = function.runtime
-            if isinstance(definition, Function):
-                name = runtime.name if isinstance(runtime, BuiltinRuntime) else 'custom'
-                image = runtime.image if isinstance(runtime, CustomRuntime) else None
-                runtime = Runtime.get_runtime(
-                    name=name,
-                    custom_image=image,
-                    startup_time=runtime.startup_time,
-                    startup_times=self.containers.startup_times,
-                )
-
-            # Assegna i flussi di arrivo e servizio della funzione registrata.
+            runtime = self._resolve_function_runtime(definition, function)
             sampler = profile.build_sampler(function.name, streams)
             registry[function.name] = replace(function, runtime=runtime, sampler=sampler)
 
-        # Lo scenario deve poter pianificare almeno un arrivo iniziale.
         if not registry:
             raise ValueError('Lo scenario richiede almeno una funzione')
         return registry
+
+    def _parse_function_definition(self, index: int, definition: Function | Mapping[str, object]) -> Function:
+        """Converte una definizione di funzione in oggetto Function."""
+        if isinstance(definition, Function):
+            return definition
+        try:
+            function_config = _FunctionConfig.parse(definition, startup_times=self.containers.startup_times)
+            return function_config.build_function()
+        except ValueError as error:
+            raise ValueError(f'functions[{index}]: {error}') from error
+
+    def _resolve_function_runtime(
+        self, definition: Function | Mapping[str, object], function: Function,
+    ) -> Runtime:
+        """Applica i tempi di startup dello scenario anche alle funzioni già istanziate."""
+        runtime = function.runtime
+        if not isinstance(definition, Function):
+            return runtime
+        name = runtime.name if isinstance(runtime, BuiltinRuntime) else 'custom'
+        image = runtime.image if isinstance(runtime, CustomRuntime) else None
+        return Runtime.get_runtime(
+            name=name,
+            custom_image=image,
+            startup_time=runtime.startup_time,
+            startup_times=self.containers.startup_times,
+        )
 
     @classmethod
     def load(cls, path: str | Path) -> 'Scenario':

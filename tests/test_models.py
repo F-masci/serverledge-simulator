@@ -59,7 +59,7 @@ class ModelsTest(unittest.TestCase):
         f = function()
         c = self.node.acquire(f)
         self.assertEqual(c.state, ContainerState.CREATING)
-        self.node.creation_succeeded(c, 0)
+        self.node.creation_succeeded(c)
         self.assertIs(self.node.acquire(f), c)
         self.assertEqual(c.requests_count, 2)
         self.assertEqual(self.node.resources.used_cpus, 1)
@@ -80,8 +80,8 @@ class ModelsTest(unittest.TestCase):
         """Riproduce TestWarmCPURejectionPreservesIdleContainer di Infrascaler."""
         f = function(concurrency=1)
         a, b = self.node.acquire(f), self.node.acquire(f)
-        self.node.creation_succeeded(a, 0)
-        self.node.creation_succeeded(b, 0)
+        self.node.creation_succeeded(a)
+        self.node.creation_succeeded(b)
         self.node.complete(a, 1)
         self.node.complete(b, 2)
 
@@ -93,9 +93,10 @@ class ModelsTest(unittest.TestCase):
 
         self.assertIsNone(self.node.acquire(f))
         self.assertEqual(pool.idle, (a, b))
-        self.assertEqual((resources.used_cpus, resources.busy_pool_used_mem, resources.warm_pool_used_mem), before)
+        after = (resources.used_cpus, resources.busy_pool_used_mem, resources.warm_pool_used_mem)
+        self.assertEqual(after, before)
 
-        self.node.creation_succeeded(pending, 2)
+        self.node.creation_succeeded(pending)
         self.node.complete(pending, 3)
         self.assertIs(self.node.acquire(f), b)
         self.assertIs(self.node.acquire(f), a)
@@ -110,7 +111,7 @@ class ModelsTest(unittest.TestCase):
         """
         f = function(memory=256)
         a = self.node.acquire(f)
-        self.node.creation_succeeded(a, 0)
+        self.node.creation_succeeded(a)
         self.node.complete(a, 1)
         self.assertEqual(self.node.resources.used_cpus, 0)
         b = self.node.acquire(function('g', memory=512))
@@ -136,8 +137,8 @@ class ModelsTest(unittest.TestCase):
 
         c1 = self.node.acquire(f)
         c2 = self.node.acquire(f)
-        self.node.creation_succeeded(c1, 0)
-        self.node.creation_succeeded(c2, 0)
+        self.node.creation_succeeded(c1)
+        self.node.creation_succeeded(c2)
         self.node.complete(c1, 1)
         self.node.complete(c2, 2)
         # Scade solo c1 a t=601.5: c2 resta nell'ordine originale.
@@ -154,7 +155,7 @@ class ModelsTest(unittest.TestCase):
         l'iterazione restituisce la stessa istanza registrata.
         """
         c = self.node.acquire(function())
-        self.node.creation_succeeded(c, 0)
+        self.node.creation_succeeded(c)
         pool = self.node.pools['f']
         self.assertEqual(len(pool), 1)
         self.assertIn(c, pool)
@@ -168,7 +169,7 @@ class ModelsTest(unittest.TestCase):
         Queste eccezioni sono un contratto Python del modello.
         """
         c = self.node.acquire(function())
-        self.node.creation_succeeded(c, 0)
+        self.node.creation_succeeded(c)
         pool = self.node.pools['f']
         with self.assertRaises(AttributeError):
             c.requests_count = 10
@@ -185,7 +186,7 @@ class ModelsTest(unittest.TestCase):
         ritrovamento nel pool senza esporre questa eccezione Python.
         """
         c = self.node.acquire(function())
-        self.node.creation_succeeded(c, 0)
+        self.node.creation_succeeded(c)
         other = Node('other', 512, 2, 'amd64')
         with self.assertRaises(ValueError):
             other.complete(c, 1)
@@ -206,9 +207,9 @@ class ModelsTest(unittest.TestCase):
         """
         f = function(concurrency=1)
         a = self.node.acquire(f)
-        self.node.creation_succeeded(a, 0)
+        self.node.creation_succeeded(a)
         b = self.node.acquire(f)
-        self.node.creation_succeeded(b, 0)
+        self.node.creation_succeeded(b)
 
         self.assertIs(a.function, f)
         self.assertIs(b.function, f)

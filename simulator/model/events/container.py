@@ -31,7 +31,7 @@ class ContainerReadyEvent(Event):
             raise ValueError('La richiesta deve avere una durata di servizio')
 
         # Notifica il nodo della riuscita della creazione del container.
-        node.creation_succeeded(container, engine.now)
+        node.creation_succeeded(container)
 
         # Pianifica il completamento del servizio.
         completion_event = CompletionEvent(ctx=self.ctx, request=self.request)

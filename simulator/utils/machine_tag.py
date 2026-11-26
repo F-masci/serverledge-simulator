@@ -10,9 +10,25 @@ _BASE_ARCHITECTURES = {'x86', 'x86_64', 'amd64', 'arm', 'arm64', 'aarch64'}
 ### Public API ###
 ##################
 
-# Costrutti PCRE/Python non supportati dal motore RE2 di Go (lookaround, atomic group e backreference).
-# Nota: altre sottigliezze RE2 (es. classi POSIX [[:alpha:]]) restano legate al motore regex Python.
-_UNSUPPORTED_RE2 = re.compile(r'(?<!\\)(?:\\\\)*\(\?(?:=|!|<=|<!|>)|(?<!\\)(?:\\\\)*\\[1-9]')
+# Prefissi di gruppi PCRE/Python non supportati dal motore RE2 di Go (lookaround e atomic group).
+_UNSUPPORTED_RE2_GROUPS = ('(?=', '(?!', '(?<=', '(?<!', '(?>')
+
+
+def _has_unsupported_re2(pattern: str) -> bool:
+    """Rileva in tempo lineare costrutti PCRE/Python non supportati da RE2 (lookaround, atomic, backreference)."""
+    i = 0
+    length = len(pattern)
+    while i < length:
+        ch = pattern[i]
+        if ch == '\\':
+            if i + 1 < length and '1' <= pattern[i + 1] <= '9':
+                return True
+            i += 2
+            continue
+        if ch == '(' and pattern.startswith(_UNSUPPORTED_RE2_GROUPS, i):
+            return True
+        i += 1
+    return False
 
 
 def validate_tag_pattern(pattern: str) -> None:
@@ -20,7 +36,7 @@ def validate_tag_pattern(pattern: str) -> None:
     if not pattern:
         return
     if pattern.startswith('^') or pattern.endswith('$') or '.*' in pattern:
-        if _UNSUPPORTED_RE2.search(pattern) is not None:
+        if _has_unsupported_re2(pattern):
             raise ValueError(f'tag_pattern non supportato da RE2: {pattern!r}')
         try:
             re.compile(pattern)

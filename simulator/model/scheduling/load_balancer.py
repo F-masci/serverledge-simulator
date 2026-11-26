@@ -199,6 +199,16 @@ class LoadBalancer(ABC):
         # Ordine di prima attivazione dei ring (un ring entra nell'ordine solo quando riceve il primo nodo).
         self._discovered: list[ArchitectureRing] = []
 
+    @property
+    def resource_cache_enabled(self) -> bool:
+        """Indica se la cache locale delle risorse dei nodi è attiva."""
+        return self._resource_cache
+
+    @property
+    def refresh_interval_s(self) -> float:
+        """Intervallo in secondi del polling periodico /status."""
+        return self._refresh_interval_s
+
     @staticmethod
     def create(
         mode: LoadBalancerMode,

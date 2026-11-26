@@ -27,7 +27,7 @@ jobs:
           cache-dependency-path: requirements.txt
 
       - name: Install dependencies
-        run: python -m pip install -r requirements.txt coverage
+        run: python -m pip install --only-binary :all: numpy==2.5.5 PyYAML==6.0.3 gymnasium==1.2.2 torch==2.15.0 "ray[rllib]==2.60.1" coverage==7.8.0
 
       - name: Run tests with coverage
         run: |
@@ -60,6 +60,6 @@ jobs:
           name: coverage
 
       - name: SonarQube Scan
-        uses: SonarSource/sonarqube-scan-action@v8.3.0
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

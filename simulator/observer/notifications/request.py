@@ -3,7 +3,7 @@
 from abc import ABC
 from dataclasses import dataclass, field
 from logging import DEBUG, INFO
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from simulator.model.execution.function import Function
 from simulator.model.execution.request import Request
@@ -85,16 +85,16 @@ class _RequestNotification(Notification, ABC):
 class RequestArrived(_RequestNotification):
     """La richiesta è arrivata nella regione di ingresso e deve ancora essere instradata."""
 
-    type = NotificationType.REQUEST_ARRIVED
-    level = INFO
+    type: ClassVar[NotificationType] = NotificationType.REQUEST_ARRIVED
+    level: ClassVar[int] = INFO
 
 
 @dataclass(frozen=True)
 class RequestQueued(_RequestNotification):
     """La richiesta è in attesa nella coda FIFO del nodo."""
 
-    type = NotificationType.REQUEST_QUEUED
-    level = DEBUG
+    type: ClassVar[NotificationType] = NotificationType.REQUEST_QUEUED
+    level: ClassVar[int] = DEBUG
 
     node: 'Node'
 
@@ -106,8 +106,8 @@ class RequestQueued(_RequestNotification):
 class RequestDequeued(_RequestNotification):
     """La richiesta è uscita dalla coda FIFO del nodo."""
 
-    type = NotificationType.REQUEST_DEQUEUED
-    level = DEBUG
+    type: ClassVar[NotificationType] = NotificationType.REQUEST_DEQUEUED
+    level: ClassVar[int] = DEBUG
 
     node: 'Node'
 
@@ -119,8 +119,8 @@ class RequestDequeued(_RequestNotification):
 class RequestForwarded(_RequestNotification):
     """La richiesta parte dalla regione di origine verso la regione di destinazione."""
 
-    type = NotificationType.REQUEST_FORWARDED
-    level = DEBUG
+    type: ClassVar[NotificationType] = NotificationType.REQUEST_FORWARDED
+    level: ClassVar[int] = DEBUG
 
     source_region: 'Region'
 
@@ -132,16 +132,16 @@ class RequestForwarded(_RequestNotification):
 class RequestDelivered(_RequestNotification):
     """La richiesta inoltrata arriva nella regione di destinazione."""
 
-    type = NotificationType.REQUEST_DELIVERED
-    level = DEBUG
+    type: ClassVar[NotificationType] = NotificationType.REQUEST_DELIVERED
+    level: ClassVar[int] = DEBUG
 
 
 @dataclass(frozen=True)
 class RequestAccepted(_RequestNotification):
     """La richiesta è stata ammessa nella regione indicata (su container o regione sintetica)."""
 
-    type = NotificationType.REQUEST_ACCEPTED
-    level = INFO
+    type: ClassVar[NotificationType] = NotificationType.REQUEST_ACCEPTED
+    level: ClassVar[int] = INFO
 
     node: 'Node | None'
     warm: bool | None = field(default=None, kw_only=True)
@@ -160,8 +160,8 @@ class RequestAccepted(_RequestNotification):
 class RequestRejectionReturning(_RequestNotification):
     """La richiesta è stata rifiutata da una regione remota e il rifiuto è in ritorno."""
 
-    type = NotificationType.REQUEST_REJECTION_RETURNING
-    level = DEBUG
+    type: ClassVar[NotificationType] = NotificationType.REQUEST_REJECTION_RETURNING
+    level: ClassVar[int] = DEBUG
 
     reason: str
     node: 'Node | None'
@@ -178,8 +178,8 @@ class RequestRejectionReturning(_RequestNotification):
 class RequestRejected(_RequestNotification):
     """La richiesta è stata rifiutata definitivamente durante il routing o l'ammissione."""
 
-    type = NotificationType.REQUEST_REJECTED
-    level = INFO
+    type: ClassVar[NotificationType] = NotificationType.REQUEST_REJECTED
+    level: ClassVar[int] = INFO
 
     reason: str
     node: 'Node | None'
@@ -196,8 +196,8 @@ class RequestRejected(_RequestNotification):
 class RequestCompleted(_RequestNotification):
     """La risposta dell'invocazione è stata consegnata al client."""
 
-    type = NotificationType.REQUEST_COMPLETED
-    level = INFO
+    type: ClassVar[NotificationType] = NotificationType.REQUEST_COMPLETED
+    level: ClassVar[int] = INFO
 
     node: 'Node | None'
     container: 'DockerContainer | None'

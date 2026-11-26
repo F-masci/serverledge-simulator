@@ -26,7 +26,7 @@ class RequestAdmissionTest(unittest.TestCase):
         self.assertEqual(first.container.state, ContainerState.CREATING)
         during_creation = Request(fun)
         self.assertFalse(node.submit(during_creation))
-        node.creation_succeeded(first.container, 0)
+        node.creation_succeeded(first.container)
         second = Request(fun)
         self.assertTrue(node.submit(second))
         self.assertTrue(second.warm)
@@ -51,7 +51,7 @@ class RequestAdmissionTest(unittest.TestCase):
         active, follower = Request(fun), Request(fun)
         oversized = Request(Function('large', 128, 2, BuiltinRuntime('python314')))
         self.assertTrue(node.submit(active))
-        node.creation_succeeded(active.container, 0)
+        node.creation_succeeded(active.container)
         self.assertTrue(node.submit(oversized))
         self.assertTrue(node.submit(follower))
 
@@ -78,7 +78,7 @@ class RequestAdmissionTest(unittest.TestCase):
         rejected.on_rejected = lambda request: self.assertEqual(request.rejection_reason, 'out_of_resources')
 
         self.assertTrue(node.submit(active))
-        node.creation_succeeded(active.container, 0)
+        node.creation_succeeded(active.container)
         self.assertTrue(node.submit(waiting))
         self.assertFalse(node.submit(rejected))
         active.complete(1)

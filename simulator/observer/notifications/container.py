@@ -3,7 +3,7 @@
 from abc import ABC
 from dataclasses import dataclass, field
 from logging import DEBUG, INFO
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from simulator.model.execution.container import ContainerState, DockerContainer
 from simulator.model.execution.function import Function
@@ -66,8 +66,8 @@ class _ContainerNotification(Notification, ABC):
 class ContainerStateChanged(_ContainerNotification):
     """Segnala una transizione di stato del container con le prenotazioni aggiornate del nodo."""
 
-    type = NotificationType.CONTAINER_STATE_CHANGED
-    level = DEBUG
+    type: ClassVar[NotificationType] = NotificationType.CONTAINER_STATE_CHANGED
+    level: ClassVar[int] = DEBUG
 
     previous: ContainerState | None = field(default=None, kw_only=True)
     state: ContainerState | None = field(default=None, kw_only=True)
@@ -99,13 +99,13 @@ class ContainerStateChanged(_ContainerNotification):
 class ContainerStarted(ContainerStateChanged):
     """Un nuovo container è pronto per l'esecuzione o per il pool idle."""
 
-    type = NotificationType.CONTAINER_STARTED
-    level = INFO
+    type: ClassVar[NotificationType] = NotificationType.CONTAINER_STARTED
+    level: ClassVar[int] = INFO
 
 
 @dataclass(frozen=True)
 class ContainerStopped(ContainerStateChanged):
     """Un container già avviato è stato rimosso e ha liberato la RAM."""
 
-    type = NotificationType.CONTAINER_STOPPED
-    level = INFO
+    type: ClassVar[NotificationType] = NotificationType.CONTAINER_STOPPED
+    level: ClassVar[int] = INFO

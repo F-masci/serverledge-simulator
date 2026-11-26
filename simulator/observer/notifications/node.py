@@ -3,7 +3,7 @@
 import json
 from dataclasses import asdict, dataclass
 from logging import DEBUG
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from simulator.model.execution.container import ContainerState, DockerContainer
 from simulator.model.topology.node import Node
@@ -75,8 +75,8 @@ class ContainerSnapshot:
 class NodeRegistered(Notification):
     """Notifica l'ingresso di un nodo nella replica con prenotazioni e container correnti."""
 
-    type = NotificationType.NODE_REGISTERED
-    level = DEBUG
+    type: ClassVar[NotificationType] = NotificationType.NODE_REGISTERED
+    level: ClassVar[int] = DEBUG
 
     run_id: str
     sim_time_s: float
@@ -115,8 +115,8 @@ class NodeRegistered(Notification):
 class NodeRemoved(Notification):
     """Notifica la rimozione di un nodo dalla topologia (scale-in)."""
 
-    type = NotificationType.NODE_REMOVED
-    level = DEBUG
+    type: ClassVar[NotificationType] = NotificationType.NODE_REMOVED
+    level: ClassVar[int] = DEBUG
 
     run_id: str
     sim_time_s: float

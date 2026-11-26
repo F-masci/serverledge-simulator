@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import os
 from pathlib import Path
 
 from .core.simulation import Simulation
@@ -10,6 +11,15 @@ from .observer import SimulationError, observer
 from .utils.logger import log_notification
 from .utils.report import format_final_report
 from .utils.validation import nonnegative_integer
+
+
+def _resolve_scenario_path(path: Path) -> Path:
+    """Risolve il percorso canonico e verifica che resti nella directory di lavoro corrente."""
+    resolved = os.path.realpath(path)
+    base_dir = os.path.realpath(os.getcwd())
+    if resolved != base_dir and not resolved.startswith(base_dir + os.sep):
+        raise ValueError(f'Percorso scenario fuori dalla directory consentita: {path}')
+    return Path(resolved)
 
 
 def main() -> None:
@@ -34,7 +44,8 @@ def main() -> None:
 
     ### Scenario ###
     try:
-        scenario = Scenario.load(args.scenario)
+        scenario_path = _resolve_scenario_path(args.scenario)
+        scenario = Scenario.load(scenario_path)
     except Exception as error:
         observer.notify(SimulationError(exception=error, failed_event='Scenario.load'))
         unsubscribe_logger()

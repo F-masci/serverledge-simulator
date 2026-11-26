@@ -60,6 +60,16 @@ class _ContainerMetrics:
         if state is ContainerState.BUSY and previous in (ContainerState.CREATING, ContainerState.IDLE):
             self.activations += 1
 
+        self._record_lifecycle_counter(previous, state, creation_time, evicted)
+
+    def _record_lifecycle_counter(
+        self,
+        previous: ContainerState | None,
+        state: ContainerState,
+        creation_time: float | None,
+        evicted: bool,
+    ) -> None:
+        """Aggiorna i contatori cumulativi di creazione, fallimento e rimozione."""
         if previous is None:
             self.creations_started += 1
         elif previous is ContainerState.CREATING:

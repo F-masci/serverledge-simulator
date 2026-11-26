@@ -76,13 +76,15 @@ class EngineTest(unittest.TestCase):
         """Nessun viaggio nel passato, tempo non finito o oggetto senza contratto Event."""
         self.engine.schedule(2, self.event('anchor'))
         self.assertTrue(self.engine.step())
+        invalid_event = self.event('invalid')
         for time in (-1, 1, float('nan'), float('inf'), True):
             with self.subTest(time=time):
                 with self.assertRaises(ValueError):
-                    self.engine.schedule(time, self.event('invalid'))
+                    self.engine.schedule(time, invalid_event)
         for delay in (-1, float('inf'), float('nan'), True):
-            with self.assertRaises(ValueError):
-                self.engine.schedule_after(delay, self.event('invalid'))
+            with self.subTest(delay=delay):
+                with self.assertRaises(ValueError):
+                    self.engine.schedule_after(delay, invalid_event)
         with self.assertRaises(TypeError):
             self.engine.schedule(2, object())
         self.assertEqual(self.engine.now, 2)
@@ -119,8 +121,9 @@ class EngineTest(unittest.TestCase):
     def test_event_cannot_be_scheduled_in_another_replica(self):
         """Il calendario rifiuta un evento che usa il contesto di un'altra replica."""
         other_engine = Simulation(self.engine.ctx.scenario)._ctx.engine
+        foreign_event = self.event('foreign')
         with self.assertRaisesRegex(ValueError, 'stesso contesto'):
-            other_engine.schedule(1, self.event('foreign'))
+            other_engine.schedule(1, foreign_event)
         self.assertFalse(other_engine.step())
 
     def test_event_contract_is_abstract_and_schedule_is_read_only(self):

@@ -131,8 +131,8 @@ class Simulation:
         self._configure_schedulers(scenario, regions)
         return MappingProxyType(regions)
 
-    @staticmethod
-    def _configure_schedulers(scenario: Scenario, regions: Mapping[str, Region]) -> None:
+    @classmethod
+    def _configure_schedulers(cls, scenario: Scenario, regions: Mapping[str, Region]) -> None:
         """Risolvi i riferimenti remoti dopo la costruzione di tutte le regioni."""
         scheduler = scenario.scheduler
         for name, region in regions.items():
@@ -140,23 +140,37 @@ class Simulation:
             config = scenario.regions[name].infrastructure
             if infrastructure is None or config is None:
                 continue
-            for ring in config.rings:
-                live_ring = infrastructure.rings[ring.id]
-                for node, node_config in zip(live_ring, ring.nodes, strict=True):
-                    neighbors = None
-                    if node_config.nearest_neighbors is not None:
-                        neighbors = tuple(
-                            infrastructure.resolve_node(peer) for peer in node_config.nearest_neighbors
-                        )
-                    infrastructure.configure_scheduler(node, NodeScheduling(
-                        policy=node_config.policy or scheduler.policy,
-                        fallback_local=(
-                            scheduler.fallback_local if node_config.fallback_local is None else node_config.fallback_local
-                        ),
-                        nearest_neighbors=neighbors,
-                        remote_region=regions[node_config.remote_region] if node_config.remote_region is not None else None,
-                        offloading_cache_validity_s=scheduler.offloading_cache_validity_s,
-                    ))
+            cls._configure_region_schedulers(infrastructure, config, scheduler, regions)
+
+    @classmethod
+    def _configure_region_schedulers(
+        cls, infrastructure, config, scheduler, regions: Mapping[str, Region],
+    ) -> None:
+        """Configura lo scheduler di ogni nodo nei ring della regione."""
+        for ring in config.rings:
+            live_ring = infrastructure.rings[ring.id]
+            for node, node_config in zip(live_ring, ring.nodes, strict=True):
+                cls._configure_node_scheduler(infrastructure, node, node_config, scheduler, regions)
+
+    @staticmethod
+    def _configure_node_scheduler(
+        infrastructure, node: Node, node_config, scheduler, regions: Mapping[str, Region],
+    ) -> None:
+        """Applica le impostazioni di offloading a un singolo nodo."""
+        neighbors = (
+            tuple(infrastructure.resolve_node(peer) for peer in node_config.nearest_neighbors)
+            if node_config.nearest_neighbors is not None
+            else None
+        )
+        fallback_local = (scheduler.fallback_local if node_config.fallback_local is None else node_config.fallback_local)
+        remote_region = (regions[node_config.remote_region] if node_config.remote_region is not None else None)
+        infrastructure.configure_scheduler(node, NodeScheduling(
+            policy=node_config.policy or scheduler.policy,
+            fallback_local=fallback_local,
+            nearest_neighbors=neighbors,
+            remote_region=remote_region,
+            offloading_cache_validity_s=scheduler.offloading_cache_validity_s,
+        ))
 
     #############################
     ### Simulation management ###
@@ -173,8 +187,9 @@ class Simulation:
         # di terminazione non è soddisfatta:
         # - si raggiunge il numero di arrivi richiesto
         # - non ci sono più eventi da processare.
-        while self._ctx.metrics.arrivals < arrivals and self._ctx.engine.step():
-            pass
+        while self._ctx.metrics.arrivals < arrivals:
+            if not self._ctx.engine.step():
+                break
 
         # Finalizza gli scaler regionali, se presenti, e raccoglie le statistiche finali.
         for region in self.regions.values():

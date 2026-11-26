@@ -57,9 +57,10 @@ class RoutingTest(unittest.TestCase):
         ):
             with self.subTest(pattern=pattern):
                 self.assertEqual(replace(function(), tag_pattern=pattern).supports_machine_tag(tag), expected)
+        base_function = function()
         for bad in ('^[', '^x86(?=/gpu)', '^x86(?!-arm)', '^x86(?>/gpu)$', r'^(x86)-\1$'):
             with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, 'tag_pattern'):
-                replace(function(), tag_pattern=bad)
+                replace(base_function, tag_pattern=bad)
 
     def test_fallback_uses_registration_order_and_rejects_after_saturation(self):
         seed = 42
@@ -120,7 +121,7 @@ class RoutingTest(unittest.TestCase):
 
         first = Request(fun)
         self.assertIs(infra.submit(first), node)
-        node.creation_succeeded(first.container, 0)
+        node.creation_succeeded(first.container)
         self.assertEqual(node.resources.available_cpus, 0)
 
         # Il proxy Go controlla solo CPU/RAM disponibili (non gli slot busy di max_concurrency).
@@ -316,8 +317,8 @@ class RoutingTest(unittest.TestCase):
 
         first = Request(fun)
         self.assertIs(infra.submit(first, now=1.0), node)
-        node.creation_succeeded(first.container, 1.0)
-        metric = lb.metric_cache.get(node)
+        node.creation_succeeded(first.container)
+        metric = lb._metric_cache.get(node)
         self.assertIsNotNone(metric)
         self.assertEqual((metric.free_memory_mb, metric.free_cpus), (128, 0.0))
 
@@ -325,7 +326,7 @@ class RoutingTest(unittest.TestCase):
         # ma finché non torna la risposta al proxy (ModifyResponse) la cache LB resta stale a 0.0 CPU
         # e rifiuta il nuovo arrivo con out_of_resources.
         node.complete(first.container, 1.5)
-        self.assertEqual(lb.metric_cache.get(node).free_cpus, 0.0)
+        self.assertEqual(lb._metric_cache.get(node).free_cpus, 0.0)
         blocked = Request(fun)
         self.assertIsNone(infra.submit(blocked, now=1.5))
         self.assertEqual(blocked.rejection_reason, 'out_of_resources')
@@ -333,7 +334,7 @@ class RoutingTest(unittest.TestCase):
         # Al ritorno della risposta (reconcile_load_balancer), la cache viene riconciliata
         # allo stato reale del nodo e il proxy torna ad accettare richieste.
         infra.reconcile_load_balancer(first, now=1.5)
-        metric = lb.metric_cache.get(node)
+        metric = lb._metric_cache.get(node)
         self.assertEqual((metric.free_memory_mb, metric.free_cpus), (256, 1.0))
         second = Request(fun)
         self.assertIs(infra.submit(second, now=1.6), node)
@@ -347,7 +348,7 @@ class RoutingTest(unittest.TestCase):
         node_ideal = infra_ideal.create_node('r', 'n1')
         r1 = Request(fun)
         self.assertIs(infra_ideal.submit(r1, now=1.0), node_ideal)
-        node_ideal.creation_succeeded(r1.container, 1.0)
+        node_ideal.creation_succeeded(r1.container)
         node_ideal.complete(r1.container, 1.5)
         r2 = Request(fun)
         self.assertIs(infra_ideal.submit(r2, now=1.5), node_ideal)
