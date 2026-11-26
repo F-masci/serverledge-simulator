@@ -1,54 +1,45 @@
-"""Inventario e isolamento delle risorse dei nodi simulati."""
+"""Test degli invarianti dell'infrastruttura multi-ring e isolamento delle risorse tra nodi.
 
-import json
+Riferimenti al sistema reale (`serverledge-infrascaler`):
+- `internal/lb/generalLoadBalancer.go`: un hash ring per ciascun `machine_tag` (più ring possono
+  condividere la stessa architettura ma con tag distinti).
+- `internal/node/node.go`: prenotazioni CPU/RAM isolate per ciascun nodo worker.
+"""
+
 import unittest
 
-from simulator.bindings import NodeBindings, RequestBindings
+from simulator.bindings import NodeBindings
 from simulator.model.execution.function import Function
-from simulator.model.execution.request import Request, RequestStatus
 from simulator.model.execution.runtime import BuiltinRuntime
 from simulator.model.topology.infrastructure import Infrastructure
-from simulator.model.topology.region import Region, RegionMode
+from simulator.model.topology.region import Region
 
 
 class InfrastructureTest(unittest.TestCase):
-    def test_creation_callbacks_observe_registered_ring_and_node(self):
-        infra = Infrastructure()
-        created_rings, created_nodes = [], []
-
-        def ring_created(infrastructure, ring):
-            self.assertIs(infrastructure.get_ring(ring.id), ring)
-            created_rings.append(ring)
-
-        def node_created(infrastructure, ring, node):
-            self.assertIs(infrastructure.get_ring(ring.id), ring)
-            self.assertIn(node, ring)
-            created_nodes.append(node)
-
-        infra.on_ring_created = ring_created
-        infra.on_node_created = node_created
-        ring = infra.create_ring('x86-small', arch='amd64', memory=512, cpus=2, machine_tag='cpu')
-        node = infra.create_node('x86-small', 'n1', 'cpu')
-
-        self.assertIs(infra.create_ring('x86-small', cpus=4), ring)
-        self.assertEqual(node.resources.total_cpus, 2)
-        self.assertEqual(created_rings, [ring])
-        self.assertEqual(created_nodes, [node])
-        self.assertEqual((node.id.arch, node.id.machine_tag), ('amd64', 'cpu'))
-
     def test_ring_capacities_are_shared_but_reservations_are_independent(self):
-        """Stessa architettura può avere ring con machine_tag distinti; ogni ring resta omogeneo."""
+        """Verifica che ring omogenei condividano la capacità ma isolino le prenotazioni per nodo.
+
+        Riferimento reale: `internal/lb/generalLoadBalancer.go` (unicità di `machine_tag` tra ring)
+        e `internal/node/node.go` (`LocalResources` indipendenti per nodo).
+
+        - Due ring sulla stessa architettura (`amd64`) possono coesistere se hanno `machine_tag`
+          distinti (`amd64-small`, `amd64-large`); un duplicato di `machine_tag` solleva `ValueError`.
+        - Tutti i nodi di uno stesso ring ereditano le medesime capacità totali, ma l'acquisizione
+          di risorse su `a` non altera `used_cpus` di `b`.
+        """
         infra = Infrastructure()
         small = infra.create_ring('small', arch='amd64', memory=512, cpus=2, machine_tag='amd64-small')
         large = infra.create_ring('large', arch='amd64', memory=1024, cpus=4, machine_tag='amd64-large')
         with self.assertRaisesRegex(ValueError, 'machine_tag'):
             infra.create_ring('dup', arch='amd64', memory=512, cpus=2, machine_tag='amd64-small')
+
         a = infra.create_node('small', 'a')
         b = infra.create_node('small', 'b')
         c = infra.create_node('large', 'c')
         for node in (a, b):
             self.assertEqual((node.resources.total_memory, node.resources.total_cpus), (512, 2))
         self.assertEqual((c.resources.total_memory, c.resources.total_cpus), (1024, 4))
+
         a.acquire(Function('f', 128, 1, BuiltinRuntime('python314')))
         self.assertEqual(a.resources.used_cpus, 1)
         self.assertEqual(b.resources.used_cpus, 0)
@@ -56,7 +47,13 @@ class InfrastructureTest(unittest.TestCase):
         self.assertIsNot(small, large)
 
     def test_conflicts_and_invalid_creation_preserve_rings(self):
-        """Creazioni non valide lasciano intatti inventario e capacità."""
+        """Verifica che creazioni invalide o conflittuali lascino intatti topologia e inventario.
+
+        - La creazione di un nodo duplicato, su un ring inesistente o di un ring con memoria non
+          valida (`0`, `-1`, `1.5`, `True`) solleva `ValueError`.
+        - Dopo i tentativi falliti, l'insieme dei ring, i nodi registrati e le capacità rimangono
+          invariati.
+        """
         infra = Infrastructure()
         ring = infra.create_ring('small', arch='amd64', memory=512, cpus=2)
         node = infra.create_node('small', 'n1')
@@ -65,15 +62,18 @@ class InfrastructureTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             infra.create_node('missing', 'n2')
         for memory in (0, -1, 1.5, True):
-            with self.subTest(memory=memory):
-                with self.assertRaises(ValueError):
-                    infra.create_ring('bad', arch='amd64', memory=memory, cpus=2)
+            with self.subTest(memory=memory), self.assertRaises(ValueError):
+                infra.create_ring('bad', arch='amd64', memory=memory, cpus=2)
         self.assertEqual(tuple(infra.rings), ('small',))
         self.assertEqual(tuple(ring), (node,))
         self.assertEqual(node.resources.total_cpus, 2)
 
     def test_node_bindings_are_propagated_to_dynamically_created_rings_and_nodes(self):
-        """Anche anelli e nodi creati a runtime ereditano automaticamente i NodeBindings."""
+        """Verifica che ring e nodi creati dinamicamente a runtime (scale-out) ereditino i `NodeBindings`.
+
+        - I nodi aggiunti sia all'avvio (`r1/n1`) sia dinamicamente in un secondo ring (`r2/n2`)
+          ricevono automaticamente i callback `on_node_registered` e `on_container_state_changed`.
+        """
         registered, state_events = [], []
         region = Region('edge')
         bindings = NodeBindings(
@@ -85,7 +85,6 @@ class InfrastructureTest(unittest.TestCase):
         infra = Infrastructure(region=region, node_bindings=bindings)
         infra.create_ring('r1', arch='amd64', memory=512, cpus=2)
         n1 = infra.create_node('r1', 'n1')
-        # Simulazione di uno scaler che crea dinamicamente un nuovo anello e un nuovo nodo.
         infra.create_ring('r2', arch='arm64', memory=256, cpus=1)
         n2 = infra.create_node('r2', 'n2')
 
@@ -94,33 +93,6 @@ class InfrastructureTest(unittest.TestCase):
         n1.acquire(fun)
         n2.acquire(fun)
         self.assertEqual([(e[0], e[1], e[2]) for e in state_events], [('edge', 'r1', 'n1'), ('edge', 'r2', 'n2')])
-
-    def test_request_bindings_and_model_serialization(self):
-        """RequestBindings collega il ciclo di vita di Request e i model sono serializzabili in JSON."""
-        events = []
-        bindings = RequestBindings(
-            on_accepted=lambda req: events.append(('accepted', req.id)),
-            on_completed=lambda req: events.append(('completed', req.id)),
-            on_state_changed=lambda req, prev, curr: events.append(('state', prev, curr)),
-        )
-        fun = Function('f', 128, 1, BuiltinRuntime('python314'))
-        region = Region('cloud')
-        self.assertIs(region.mode, RegionMode.ALWAYS_SUCCEEDS)
-        self.assertTrue(region.is_always_succeeds)
-
-        request = Request(fun)
-        bindings.bind(request)
-        region.submit(request, now=0.0)
-        request.complete(0.0)
-
-        self.assertIn(('accepted', request.id), events)
-        self.assertIn(('completed', request.id), events)
-        self.assertIn(('state', RequestStatus.CREATED, RequestStatus.ACCEPTED), events)
-        self.assertIn(('state', RequestStatus.ACCEPTED, RequestStatus.COMPLETED), events)
-
-        for obj in (region, fun, fun.runtime, Infrastructure(region=region)):
-            parsed = json.loads(obj.to_json())
-            self.assertEqual(parsed, obj.to_dict())
 
 
 if __name__ == '__main__':

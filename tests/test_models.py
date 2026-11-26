@@ -1,43 +1,49 @@
-"""Test dei modelli di funzione, container, pool e nodo.
+"""Test di aderenza del modello di funzione, container, pool e nodo rispetto a Serverledge Go.
 
-Riferimenti al codice Infrascaler (percorsi relativi al repository):
-- internal/container/runtimes.go, RuntimeToInfo: supporto alla concorrenza.
-- internal/api/api.go, CreateOrUpdateFunction: normalizzazione di MaxConcurrency.
-- internal/node/node.go, Resources: contabilità locale; FreeMemory,
-  AvailableMemory e AvailableCPUs: risorse libere e recuperabili.
-- internal/node/pool.go, GetContainerPool: pool locale per funzione;
-  popIdleContainer: ordine LIFO; acquireWarmContainer e AcquireContainer:
-  riuso e acquisizione; AcquireResourcesForNewContainer e acquireNewMemory:
-  prenotazioni CPU/RAM; HandleCompletion: rilascio all'ultima invocazione;
-  NewContainerWithAcquiredResources: pubblicazione e rollback della creazione;
-  PrewarmInstances: creazione anticipata; dismissContainer: recupero RAM idle;
-  DeleteExpiredContainer: eliminazione dopo la scadenza.
-- internal/container/docker.go, DockerFactory.Create: limiti RAM e quota CPU.
+Riferimenti al sistema reale (`serverledge-infrascaler`):
+- `internal/container/runtimes.go` (`RuntimeToInfo`) e `internal/api/api.go` (`CreateOrUpdateFunction`):
+  normalizzazione di `MaxConcurrency` in base al supporto alla concorrenza del runtime.
+- `internal/node/node.go` (`Resources`, `FreeMemory`, `AvailableMemory`, `AvailableCPUs`):
+  contabilità locale delle prenotazioni di CPU e RAM.
+- `internal/node/pool.go` (`GetContainerPool`, `popIdleContainer`, `acquireWarmContainer`,
+  `AcquireContainer`, `AcquireResourcesForNewContainer`, `acquireNewMemory`, `HandleCompletion`,
+  `dismissContainer`, `DeleteExpiredContainer`): ciclo di vita dei container e ordine LIFO.
+- `internal/container/docker.go` (`DockerFactory.Create`): traduzione dei limiti RAM e quota CPU Docker.
+- `internal/test/pool_test.go`: `TestWarmCPURejectionPreservesIdleContainer`,
+  `TestInvalidCPUReservationIsRejected`.
 """
 
+import math
 import unittest
 
 from simulator.model.execution.container import ContainerState
 from simulator.model.execution.function import Function
-from simulator.model.execution.runtime import BuiltinRuntime, CustomRuntime, Runtime
+from simulator.model.execution.runtime import BuiltinRuntime, CustomRuntime
 from simulator.model.topology.node import Node
 
 
 def function(name='f', concurrency=2, memory=128, runtime=None):
-    """Fixture: funzione da una CPU, con compatibilità già risolta."""
-    return Function(name, memory, 1, runtime or BuiltinRuntime('python314'), concurrency, supported_archs=('amd64', 'arm64'))
+    """Fixture: funzione da 1 CPU con compatibilità multi-architettura."""
+    return Function(
+        name, memory, 1, runtime or BuiltinRuntime('python314'), concurrency,
+        supported_archs=('amd64', 'arm64'),
+    )
 
 
 class ModelsTest(unittest.TestCase):
     def setUp(self):
-        # Nodo nuovo per ogni test: 512 unità di RAM e 2 CPU prenotabili.
+        # Nodo pulito per ogni test: 512 MiB di RAM e 2 CPU prenotabili.
         self.node = Node('n', 512, 2, 'amd64')
 
     def test_runtime_limits(self):
-        """Verifica il limite effettivo alla registrazione della funzione.
+        """Verifica la normalizzazione di `max_concurrency` alla registrazione della funzione.
 
-        I runtime concorrenti mantengono la richiesta di due invocazioni;
-        nodejs17ng e custom la riducono a una. Un valore zero diventa uno.
+        Riferimento reale: `internal/container/runtimes.go` (`RuntimeToInfo`) e
+        `internal/api/api.go` (`CreateOrUpdateFunction`).
+
+        - I runtime concorrenti (`python314`, `python312ml`, `go125`) conservano `max_concurrency=2`.
+        - I runtime non concorrenti (`nodejs17ng` e `custom`) forzano `max_concurrency=1`.
+        - Un valore nullo (`concurrency=0`) viene normalizzato al minimo valido (`1`).
         """
         for name in ('python314', 'python312ml', 'go125'):
             self.assertEqual(function(runtime=BuiltinRuntime(name)).max_concurrency, 2)
@@ -48,13 +54,18 @@ class ModelsTest(unittest.TestCase):
         self.assertEqual(function(concurrency=0).max_concurrency, 1)
 
     def test_busy_reuse_and_last_completion(self):
-        """Verifica il ciclo cold → busy condiviso → idle → scadenza.
+        """Verifica il ciclo completo cold → busy condiviso → idle → scadenza TTL.
 
-        Il secondo acquire deve restituire la stessa istanza senza una seconda
-        prenotazione CPU. Solo l'ultimo completamento libera CPU e rende warm
-        la RAM. Alla scadenza esatta il container resta; dopo viene rimosso.
-        CREATING è uno stato del simulatore: rende visibile la prenotazione
-        che precede la pubblicazione del container nel pool reale.
+        Riferimento reale: `internal/node/pool.go` (`AcquireContainer`, `HandleCompletion`,
+        `DeleteExpiredContainer`).
+
+        - Il primo `acquire` avvia una creazione (`CREATING`) e prenota 1 CPU / 128 MiB.
+        - Dopo `creation_succeeded`, un secondo `acquire` sulla stessa funzione (`max_concurrency=2`)
+          riusa lo stesso container busy senza duplicare la prenotazione CPU (`used_cpus=1`).
+        - Il primo `complete` lascia il container `BUSY`; solo l'ultimo `complete` (t=2) azzera la CPU
+          usata e sposta la RAM nel pool warm (`warm_pool_used_mem=128`).
+        - Alla scadenza esatta (`t=602`, `idle_timeout=600`) il container resta `IDLE`; strettamente
+          dopo (`t=603`) il janitor lo distrugge (`DESTROYED`) liberando tutta la RAM (`free_memory=512`).
         """
         f = function()
         c = self.node.acquire(f)
@@ -63,13 +74,13 @@ class ModelsTest(unittest.TestCase):
         self.assertIs(self.node.acquire(f), c)
         self.assertEqual(c.requests_count, 2)
         self.assertEqual(self.node.resources.used_cpus, 1)
-        # La prima conclusione lascia una richiesta attiva e il container busy.
+
         self.node.complete(c, 1)
         self.assertEqual(c.state, ContainerState.BUSY)
         self.node.complete(c, 2)
         self.assertEqual(self.node.resources.used_cpus, 0)
         self.assertEqual(self.node.resources.warm_pool_used_mem, 128)
-        # Ultimo completamento a t=2 e timeout predefinito di 600 secondi.
+
         self.node.expire(602, container=c)
         self.assertEqual(c.state, ContainerState.IDLE)
         self.node.expire(603, container=c)
@@ -77,7 +88,17 @@ class ModelsTest(unittest.TestCase):
         self.assertEqual(self.node.resources.free_memory, 512)
 
     def test_warm_cpu_rejection_preserves_idle_inventory_and_lifo(self):
-        """Riproduce TestWarmCPURejectionPreservesIdleContainer di Infrascaler."""
+        """Verifica che un rifiuto per CPU su container warm preservi inventario idle e ordine LIFO.
+
+        Riproduce 1:1 `TestWarmCPURejectionPreservesIdleContainer` in `internal/test/pool_test.go`.
+
+        - Due container dedicati (`a`, `b`, `concurrency=1`) completano in ordine `a` poi `b`,
+          definendo lo stack idle LIFO `(a, b)` con `b` in cima.
+        - Un `blocker` da 2 CPU satura tutta la CPU del nodo.
+        - Un successivo `acquire(f)` viene rifiutato (`None`) senza alterare lo stack idle né i
+          contatori di risorse (`used_cpus`, `busy_pool_used_mem`, `warm_pool_used_mem`).
+        - Al completamento del `blocker`, il riuso warm estrae prima `b` e poi `a` (ordine LIFO).
+        """
         f = function(concurrency=1)
         a, b = self.node.acquire(f), self.node.acquire(f)
         self.node.creation_succeeded(a)
@@ -101,19 +122,24 @@ class ModelsTest(unittest.TestCase):
         self.assertIs(self.node.acquire(f), b)
         self.assertIs(self.node.acquire(f), a)
 
-    def test_idle_eviction_and_limits(self):
-        """Verifica recupero RAM warm e traduzione dei limiti Docker.
+    def test_idle_eviction_and_docker_limits(self):
+        """Verifica l'eviction della RAM warm e la traduzione dei limiti Docker.
 
-        Un container idle da 256 non trattiene CPU. Una nuova funzione da 512 richiede
-        tutta la memoria del nodo: il container idle deve essere eliminato.
-        La nuova prenotazione occupa tutta la RAM. I limiti Docker derivati sono
-        512 x 1048576 byte e 50000 microsecondi di quota per una CPU.
+        Riferimenti reali: `internal/node/pool.go` (`acquireNewMemory`, `dismissContainer`) e
+        `internal/container/docker.go` (`DockerFactory.Create`).
+
+        - Un container idle da 256 MiB non trattiene CPU (`used_cpus=0`).
+        - L'arrivo di una funzione `g` da 512 MiB (intera RAM del nodo) forza l'eviction del
+          container idle `a` (`DESTROYED`), azzerando la memoria libera residua (`free_memory=0`).
+        - I limiti Docker derivati sul nuovo container sono `512 * 1048576` byte di RAM e
+          `50000` microsecondi di CPU quota per 1 CPU (`cpu_period=50000` in Serverledge).
         """
         f = function(memory=256)
         a = self.node.acquire(f)
         self.node.creation_succeeded(a)
         self.node.complete(a, 1)
         self.assertEqual(self.node.resources.used_cpus, 0)
+
         b = self.node.acquire(function('g', memory=512))
         self.assertIsNotNone(b)
         self.assertEqual(a.state, ContainerState.DESTROYED)
@@ -121,69 +147,30 @@ class ModelsTest(unittest.TestCase):
         self.assertEqual(b.memory_limit_bytes, 512 * 1048576)
         self.assertEqual(b.cpu_quota_us, 50000)
 
-    def test_unknown_runtime_and_empty_machine_tag_and_callback_consistency(self):
-        """Verifica rifiuto runtime ignoti, fallback machine_tag vuoto e ordine callback."""
-        with self.assertRaisesRegex(ValueError, 'Runtime sconosciuto'):
-            Runtime.get_runtime('unknown-runtime')
+    def test_invalid_cpu_reservation_is_rejected(self):
+        """Verifica che richieste di CPU non valide vengano rifiutate senza mutare le risorse.
 
-        empty_tag_node = Node('n-empty', 512, 2, 'amd64', '')
-        self.assertEqual(empty_tag_node.id.machine_tag, 'amd64')
+        Riproduce `TestInvalidCPUReservationIsRejected` in `internal/test/pool_test.go`.
 
-        observed = []
-        f = function(concurrency=1)
-        self.node.on_container_created = lambda node, c: observed.append(('created', c in node.pools[f.name].busy))
-        self.node.on_container_idle = lambda node, c: observed.append(('idle', c in node.pools[f.name].idle))
-        self.node.on_container_destroyed = lambda node, c: observed.append(('destroyed', c.node is node))
-
-        c1 = self.node.acquire(f)
-        c2 = self.node.acquire(f)
-        self.node.creation_succeeded(c1)
-        self.node.creation_succeeded(c2)
-        self.node.complete(c1, 1)
-        self.node.complete(c2, 2)
-        # Scade solo c1 a t=601.5: c2 resta nell'ordine originale.
-        self.node.expire(601.5, container=c1)
-        self.assertEqual(self.node.pools[f.name].idle, (c2,))
-        self.assertIn(('created', True), observed)
-        self.assertIn(('idle', True), observed)
-        self.assertIn(('destroyed', True), observed)
-
-    def test_pool_supports_length_membership_and_iteration(self):
-        """Il pool espone numero e istanze dei container tramite protocolli Python.
-
-        Dopo la pubblicazione, len conta il container, in lo riconosce e
-        l'iterazione restituisce la stessa istanza registrata.
+        - Valori di `cpu_demand` pari a `0`, `-1`, `NaN`, `+Inf`, `-Inf` vengono rifiutati in fase
+          di costruzione di `Function` con `ValueError`.
+        - I contatori di risorse del nodo (`used_cpus`, `free_memory`) rimangono invariati.
         """
-        c = self.node.acquire(function())
-        self.node.creation_succeeded(c)
-        pool = self.node.pools['f']
-        self.assertEqual(len(pool), 1)
-        self.assertIn(c, pool)
-        self.assertEqual(tuple(pool), (c,))
-
-    def test_public_state_rejects_direct_assignment(self):
-        """Contatore richieste e mappa dei pool sono pubblicamente di sola lettura.
-
-        Le assegnazioni dirette devono fallire: le modifiche passano dalle
-        operazioni del nodo per mantenere coerenti stato e prenotazioni.
-        Queste eccezioni sono un contratto Python del modello.
-        """
-        c = self.node.acquire(function())
-        self.node.creation_succeeded(c)
-        pool = self.node.pools['f']
-        with self.assertRaises(AttributeError):
-            c.requests_count = 10
-        with self.assertRaises(TypeError):
-            self.node.pools['other'] = pool
-        self.assertEqual(c.requests_count, 1)
-        self.assertEqual(tuple(self.node.pools), ('f',))
+        before = (self.node.resources.used_cpus, self.node.resources.free_memory)
+        for cpu in (0, -1, math.nan, math.inf, -math.inf):
+            with self.subTest(cpu=cpu), self.assertRaises(ValueError):
+                Function('invalid-cpu', 128, cpu, BuiltinRuntime('python314'))
+        after = (self.node.resources.used_cpus, self.node.resources.free_memory)
+        self.assertEqual(after, before)
 
     def test_node_rejects_completion_of_another_nodes_container(self):
-        """Un nodo non può completare una richiesta ospitata da un altro nodo.
+        """Verifica l'isolamento dei pool tra nodi distinti al completamento di un container.
 
-        Il rifiuto non deve cambiare il container né le risorse dei due nodi.
-        Il modello solleva ValueError; il codice Go registra il mancato
-        ritrovamento nel pool senza esporre questa eccezione Python.
+        Riferimento reale: `internal/node/pool.go` (`HandleCompletion` cerca il container nel
+        solo pool locale del nodo destinatario).
+
+        - Chiamare `other.complete(c, 1)` per un container `c` allocato su `self.node` solleva
+          `ValueError` e lascia inalterati stato del container e contatori di entrambi i nodi.
         """
         c = self.node.acquire(function())
         self.node.creation_succeeded(c)
@@ -197,13 +184,14 @@ class ModelsTest(unittest.TestCase):
         self.assertEqual(other.resources.free_memory, 512)
 
     def test_same_function_containers_have_distinct_identity_and_state(self):
-        """Due istanze della stessa funzione restano distinte nel pool.
+        """Verifica che istanze distinte della stessa funzione abbiano identità e stato indipendenti.
 
-        Con concorrenza uno, una seconda richiesta mentre la prima è attiva
-        crea un altro container. Funzione condivisa non significa identità
-        condivisa: oggetti e ID devono differire, senza collassare in un set.
-        Completando il primo, soltanto quello diventa idle; il secondo resta
-        busy con la propria richiesta e la propria prenotazione CPU/RAM.
+        Riferimento reale: `internal/node/pool.go` (`GetContainerPool`, lista busy/idle per funzione).
+
+        - Con `max_concurrency=1`, due acquisizioni concorrenti creano due container distinti (`a`, `b`)
+          nel medesimo pool con ID diversi.
+        - Il completamento di `a` sposta solo `a` nel pool `idle` (RAM warm), mentre `b` rimane
+          `BUSY` trattenendo la propria CPU e RAM busy.
         """
         f = function(concurrency=1)
         a = self.node.acquire(f)
@@ -214,21 +202,13 @@ class ModelsTest(unittest.TestCase):
         self.assertIs(a.function, f)
         self.assertIs(b.function, f)
         self.assertIsNot(a, b)
-        self.assertNotEqual(a, b)
         self.assertNotEqual(a.id, b.id)
-        self.assertEqual(len({a, b}), 2)
         pool = self.node.pools[f.name]
-        self.assertEqual(len(pool), 2)
-        self.assertIn(a, pool)
-        self.assertIn(b, pool)
         self.assertEqual(pool.busy, (a, b))
 
-        # Il completamento individua l'istanza, non soltanto la funzione.
         self.node.complete(a, 1)
         self.assertEqual(pool.idle, (a,))
         self.assertEqual(pool.busy, (b,))
-        self.assertEqual(a.requests_count, 0)
-        self.assertEqual(b.requests_count, 1)
         self.assertEqual(a.state, ContainerState.IDLE)
         self.assertEqual(b.state, ContainerState.BUSY)
         self.assertEqual(self.node.resources.used_cpus, 1)

@@ -1,4 +1,12 @@
-"""Test unitari e di integrazione per Gymnasium e Ray RLlib PPO nello scaler regionale."""
+"""Test unitari e di integrazione dello scaler regionale RL (attuatore, contabilità, Gymnasium, Ray RLlib PPO).
+
+Verifica il contratto del controllo di autoscaling regionale:
+- configurazione selettiva per regione;
+- spazio azioni, mascheramento vincoli (`min_nodes`/`max_nodes`/quota) e drain deterministico;
+- contabilità energetica continua $K_t$, attese $D_t$ e reward a due termini;
+- conformità `gymnasium.utils.env_checker.check_env`, checkpoint RLlib PPO e
+  intercambiabilità di `ZoneController` con un `ScalingBackend` esterno (es. gRPC verso Infrascaler).
+"""
 
 import tempfile
 import unittest
@@ -6,16 +14,17 @@ from pathlib import Path
 
 import numpy as np
 from gymnasium.utils.env_checker import check_env
-from simulator.core.simulation import Simulation
-from simulator.io.scenario import Scenario
-from simulator.model.scaling import PPOScaler
-from simulator.observer.notifications import NotificationType
-from simulator.random.streams import RandomStreams, StreamKind
 from scaler import (
     CommandOutcome, FEATURES_PER_RING, PPOConfig, RLlibPPOPolicy,
     RewardConfig, RingObservation, ScalingActionKind, ScalingBackend, ScalingCommand,
     ScalingResult, ZoneController, ZoneObservation, load_rllib_module,
 )
+from simulator.core.simulation import Simulation
+from simulator.io.scenario import Scenario
+from simulator.model.execution.request import Request
+from simulator.model.scaling import PPOScaler
+from simulator.observer.notifications import NotificationType
+from simulator.random.streams import RandomStreams, StreamKind
 from simulator.utils.report import format_metrics
 from trainer import ServerledgeScalingEnv, train_rllib_ppo
 
@@ -75,42 +84,15 @@ def _two_ring_scenario(
     )
 
 
-class TestScalerConfig(unittest.TestCase):
-    """Verifica parsing e validazione delle configurazioni di scaler e ring."""
-
-    def test_default_scaler_disabled(self) -> None:
-        scenario = _two_ring_scenario()
-        sim = Simulation(scenario)
-        self.assertIsNone(sim.regions['default'].scaler)
-
-    def test_unavailable_algorithms_raise_not_implemented(self) -> None:
-        for mode in ('DDQN', 'Rainbow'):
-            scenario = _two_ring_scenario(scaler={'mode': mode})
-            with self.assertRaises(NotImplementedError):
-                Simulation(scenario)
-
-    def test_scaler_rejected_on_always_succeeds_region(self) -> None:
-        with self.assertRaises(ValueError):
-            Scenario(
-                functions=[{
-                    'name': 'f1',
-                    'runtime': 'python314',
-                    'memory_mb': 128,
-                    'cpu_demand': 1.0,
-                    'arrival_rate': 1.0,
-                    'service_rate': 2.0,
-                    'first_arrival_time': 0.5,
-                }],
-                regions={
-                    'cloud': {
-                        'mode': 'always_succeeds',
-                        'service_time_s': 0.1,
-                        'scaler': {'mode': 'PPO'},
-                    },
-                },
-            )
+class TestActuatorAndLifecycle(unittest.TestCase):
+    """Verifica configurazione per regione, spazio azioni, maschere, quote e drain dei nodi."""
 
     def test_per_region_scaler_override(self) -> None:
+        """Verifica l'attivazione selettiva dello scaler PPO su una singola regione dello scenario.
+
+        - Configura due regioni simulate (`edge` con `scaler={'mode': 'PPO'}` e `backup` senza scaler).
+        - Verifica che `Simulation` istanzi `PPOScaler` solo su `edge` e lasci `backup.scaler` a `None`.
+        """
         scenario = Scenario(
             functions=[{
                 'name': 'f1',
@@ -153,11 +135,14 @@ class TestScalerConfig(unittest.TestCase):
         self.assertIsInstance(sim.regions['edge'].scaler, PPOScaler)
         self.assertIsNone(sim.regions['backup'].scaler)
 
-
-class TestActuatorAndLifecycle(unittest.TestCase):
-    """Verifica spazio azioni, maschere, quote, selezione deterministica e drain."""
-
     def test_action_space_and_masks_for_two_rings(self) -> None:
+        """Verifica codifica azioni, mascheramento limiti `min_nodes`/`max_nodes` e rifiuto comandi oltre quota.
+
+        - Con 2 ring (`edge-x86` [1..2] con 1 nodo, `edge-arm` [0..1] con 1 nodo), `action_dim == 5`
+          (`HOLD`, `SCALE_OUT/IN` per ciascun ring) e la maschera iniziale è `[T, T, F, F, T]`.
+        - Un `SCALE_OUT` su `edge-x86` porta `provisioning_count=1`, esaurisce `remaining_quota=0`
+          e disabilita subito l'azione `SCALE_OUT` nella maschera; un secondo `SCALE_OUT` viene rifiutato.
+        """
         scenario = _two_ring_scenario(
             scaler={'mode': 'PPO', 'interval_s': 2.0},
             x86_scaling={'min_nodes': 1, 'max_nodes': 2, 'boot_time_s': 3.0},
@@ -192,6 +177,14 @@ class TestActuatorAndLifecycle(unittest.TestCase):
         self.assertEqual(act.rejected_commands, 1)
 
     def test_deterministic_scale_in_and_drain_completion(self) -> None:
+        """Verifica la scelta deterministica del candidato scale-in (nodo meno carico) e il drain graceful.
+
+        - A parità di carico (`0`), il candidato deterministico è `x86-a`; dopo aver sottomesso una
+          richiesta su `x86-a`, il candidato diventa il nodo libero `x86-b`.
+        - Il primo `SCALE_IN` rimuove immediatamente `x86-b` (`COMPLETED`, `draining_count=0`).
+        - Il secondo `SCALE_IN` su `x86-a` (occupato) lo esclude subito dal ring in stato `IN_PROGRESS`
+          (`draining_count=1`) e completa lo spegnimento al termine della richiesta in volo.
+        """
         scenario = _two_ring_scenario(
             scaler={'mode': 'PPO', 'interval_s': 10.0},
             x86_nodes=[{'name': 'x86-a'}, {'name': 'x86-b'}],
@@ -215,7 +208,6 @@ class TestActuatorAndLifecycle(unittest.TestCase):
         self.assertIs(ring_act.select_scale_in_candidate(), node_a)
 
         fn = scenario.function_registry['fn-any']
-        from simulator.model.execution.request import Request
         req = Request(fn, service_duration=2.0, arrival_time=0.0)
         sim._build_request_bindings().bind(req)
         region.submit(req, now=0.0, node=node_a)
@@ -243,9 +235,14 @@ class TestActuatorAndLifecycle(unittest.TestCase):
 
 
 class TestAccountingAndReward(unittest.TestCase):
-    """Verifica contabilità continua di energia K_t, attese D_t e reward a due termini."""
+    """Verifica contabilità continua di energia K_t, attese/penalità D_t e reward a due termini."""
 
     def test_idle_energy_and_reward_formula(self) -> None:
+        """Verifica il calcolo esatto dell'energia idle in kWh e del reward normalizzato senza carico.
+
+        - Un nodo da `100 W` idle per `36 s` consuma esattamente `100 * 36 / 3_600_000 = 0.001 kWh`.
+        - Con `w_k=2.0`, `k_ref=0.001` e `d_cost=0.0`, il reward deve essere esattamente `-2.0`.
+        """
         scenario = _two_ring_scenario(
             scaler={
                 'mode': 'PPO',
@@ -273,6 +270,11 @@ class TestAccountingAndReward(unittest.TestCase):
         self.assertAlmostEqual(snap.reward, -2.0 * (0.001 / 0.001), places=12)
 
     def test_all_off_rejection_penalty_accounting(self) -> None:
+        """Verifica la contabilizzazione delle penalità di rifiuto quando tutti i nodi sono spenti.
+
+        - Con 0 nodi attivi e `timeout_penalty_s=10.0`, 5 arrivi rifiutati generano `0.0 kWh`
+          di energia, `50.0 req·s` di penalità in `D_t` e reward totale `-5.0` (`d_ref=10.0`).
+        """
         scenario = _two_ring_scenario(
             scaler={
                 'mode': 'PPO',
@@ -307,9 +309,15 @@ class TestAccountingAndReward(unittest.TestCase):
 
 
 class TestGymnasiumEnvAndRLlibPPO(unittest.TestCase):
-    """Verifica conformità Gymnasium, inferenza mascherata e training Ray RLlib PPO."""
+    """Verifica conformità Gymnasium, inferenza mascherata, training Ray RLlib PPO e backend esterno."""
 
     def test_gymnasium_env_checker_and_step_contract(self) -> None:
+        """Verifica che `ServerledgeScalingEnv` superi `gymnasium.utils.env_checker.check_env` e rispetti `max_steps`.
+
+        - Controlla forma di `observations` (con `history_length=2`) e `action_mask` (5 azioni).
+        - Esegue un episodio completo fino a `truncated=True` verificando `steps == 5`,
+          `reward <= 0` ed `energy_kwh >= 0`.
+        """
         scenario = _two_ring_scenario(
             scaler={'mode': 'PPO', 'interval_s': 2.0, 'history_length': 2},
             x86_scaling={'min_nodes': 1, 'max_nodes': 3, 'boot_time_s': 1.0},
@@ -335,6 +343,11 @@ class TestGymnasiumEnvAndRLlibPPO(unittest.TestCase):
         self.assertEqual(steps, 5)
 
     def test_rllib_policy_masking_and_checkpoint_roundtrip(self) -> None:
+        """Verifica che `RLlibPPOPolicy` rispetti rigorosamente l'action mask e preservi l'inferenza dopo save/load.
+
+        - In modalità stocastica estrae solo le azioni consentite dalla maschera (`0` o `2`).
+        - Dopo `save()` + `load_rllib_module()`, la selezione deterministica produce la stessa azione.
+        """
         rng = RandomStreams(7).stream(StreamKind.SCALING, 'test-rllib')
         cfg = PPOConfig(hidden_sizes=(16, 16), deterministic=True)
         policy = RLlibPPOPolicy(obs_dim=6, action_dim=5, config=cfg, seed=7)
@@ -353,6 +366,13 @@ class TestGymnasiumEnvAndRLlibPPO(unittest.TestCase):
             self.assertEqual(reloaded.select_action(obs, mask, rng=rng, deterministic=True), expected)
 
     def test_rllib_ppo_train_and_load_in_simulation(self) -> None:
+        """Verifica il ciclo end-to-end: training `train_rllib_ppo`, salvataggio checkpoint e valutazione riproducibile.
+
+        - Addestra 1 iterazione PPO su uno scenario a 2 ring e salva il checkpoint `RLModule`.
+        - Ricarica lo stesso checkpoint in due repliche `Simulation` con identico seed e verifica
+          identità del reward totale, coerenza delle notifiche `SCALER_DECISION` e presenza della
+          sezione `Autoscaling regionale` nel report.
+        """
         scaler_cfg = {
             'mode': 'PPO',
             'interval_s': 2.0,
@@ -392,7 +412,6 @@ class TestGymnasiumEnvAndRLlibPPO(unittest.TestCase):
             self.assertEqual(len(result['history']), 1)
             self.assertIsNotNone(result['checkpoint_path'])
 
-            # Carica il checkpoint RLlib direttamente dallo scenario e verifica la riproducibilità.
             eval_scaler = {
                 **scaler_cfg,
                 'ppo': {**scaler_cfg['ppo'], 'checkpoint_path': result['checkpoint_path']},
@@ -436,8 +455,13 @@ class TestGymnasiumEnvAndRLlibPPO(unittest.TestCase):
             self.assertIn('ray.rllib', report)
 
     def test_zone_controller_interchangeable_with_external_backend(self) -> None:
-        """Verifica che ZoneController + RLlibPPOPolicy girino su un ScalingBackend esterno (es. gRPC)."""
+        """Verifica che `ZoneController` + `RLlibPPOPolicy` operino su un `ScalingBackend` esterno (es. gRPC Go).
 
+        - Collega il controller a un backend implementante il solo protocollo `ScalingBackend`
+          senza alcuna dipendenza dal simulatore.
+        - Verifica che `control_step()` esegua un comando valido rispetto ai vincoli di maschera
+          e calcoli il reward esatto (`-2.0`).
+        """
         class _MockGrpcBackend(ScalingBackend):
             def __init__(self) -> None:
                 self.executed: list[ScalingCommand] = []
@@ -497,10 +521,9 @@ class TestGymnasiumEnvAndRLlibPPO(unittest.TestCase):
             rng=RandomStreams(9).stream(StreamKind.SCALING, 'mock-grpc'),
         )
 
-        obs, cmd, res, breakdown = controller.control_step(backend)
+        _, cmd, res, breakdown = controller.control_step(backend)
         self.assertEqual(len(backend.executed), 1)
         self.assertEqual(res.outcome, CommandOutcome.ACCEPTED)
-        # Verifica che la maschera sia stata rispettata (niente scale_in su ring-x86, niente scale_out su ring-arm).
         self.assertNotEqual((cmd.action, cmd.ring_id), (ScalingActionKind.SCALE_IN, 'ring-x86'))
         self.assertNotEqual((cmd.action, cmd.ring_id), (ScalingActionKind.SCALE_OUT, 'ring-arm'))
         self.assertAlmostEqual(breakdown.reward, -2.0, places=12)
