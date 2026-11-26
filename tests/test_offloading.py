@@ -312,6 +312,46 @@ name = "edge-2"
         self.assertEqual(accepted.to_dict()['offloaded_from_node_id'], 'edge-1')
         self.assertEqual(statistics.metrics['total']['arrivals'], 1)
 
+    def test_edgeonly_without_local_fallback_and_dynamic_peer_discovery_and_no_cache(self):
+        """Verifica `edgeonly` con `fallback_local=False`, discovery dinamica dei primi 2 peer e cache disabilitata.
+
+        Riferimento reale: `internal/scheduling/edgeOnlyPolicy.go` (`fallbackLocal=false` rifiuta
+        se nessun vicino è disponibile) e `internal/scheduling/offloading.go` (selezione sui primi
+        due peer della regione quando `nearest_neighbors` non è fissato, e rivalutazione immediata
+        con `offloading_cache_validity_s=0`).
+        """
+        # 1. fallback_local=False senza vicini compatibili -> rifiuta invece di eseguire localmente.
+        isolated = self.node('isolated')
+        self.infrastructure.configure_scheduler(isolated, NodeScheduling(
+            SchedulingPolicy.EDGE_ONLY, fallback_local=False, nearest_neighbors=(),
+        ))
+        req_rejected = Request(self.function, can_offload=True)
+        self.assertIsNone(self.infrastructure.submit(req_rejected, node=isolated))
+        self.assertIs(req_rejected.status, RequestStatus.REJECTED)
+        self.assertEqual(isolated.resources.used_cpus, 0)
+
+        # 2. Discovery dinamica (nearest_neighbors=None) con cache disabilitata (validity=0):
+        #    sceglie il peer con più memoria libera tra i primi due e rivaluta subito alla richiesta successiva.
+        infra2 = Infrastructure()
+        for name, mem in (('origin', 128), ('p1', 256), ('p2', 512)):
+            infra2.create_ring(name, arch='amd64', memory=mem, cpus=2, machine_tag=f'amd64/{name}')
+            infra2.create_node(name, name, f'amd64/{name}')
+        origin = infra2.resolve_node('origin')
+        p1 = infra2.resolve_node('p1')
+        p2 = infra2.resolve_node('p2')
+        infra2.configure_scheduler(origin, NodeScheduling(
+            SchedulingPolicy.EDGE_ONLY, fallback_local=False, offloading_cache_validity_s=0.0,
+        ))
+
+        r1 = Request(self.function, can_offload=True)
+        self.assertIs(infra2.submit(r1, node=origin, now=1.0), p2)
+        # Satura p2 con un blocker da 384 MiB (restano 0 MiB su p2, 256 MiB su p1).
+        blocker = Function('blocker', 384, 1, BuiltinRuntime('python314'))
+        self.assertIs(infra2.submit(Request(blocker), node=p2, now=1.5), p2)
+        # Senza cache, alla richiesta successiva (t=1.6) rivaluta immediatamente e sceglie p1.
+        r2 = Request(self.function, can_offload=True)
+        self.assertIs(infra2.submit(r2, node=origin, now=1.6), p1)
+
 
 if __name__ == '__main__':
     unittest.main()

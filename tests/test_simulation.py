@@ -561,18 +561,36 @@ class SimulationTest(unittest.TestCase):
 
 class WelfordTest(unittest.TestCase):
     def test_online_moments_and_timed_snapshot(self):
-        """Verifica stabilità numerica di `Welford` su valori grandi (`10^12 ± 2`) e integrale a tratti di `TimedWelford`."""
+        """Verifica stabilità numerica di `Welford` (inclusi pesi 0, positivi e rifiuto pesi negativi) e `TimedWelford`."""
         moments = Welford()
         for offset in (-2, 0, 2):
             moments.add(10**12 + offset)
         self.assertEqual(moments.mean, 10**12)
         self.assertAlmostEqual(moments.variance, 8 / 3)
+        self.assertEqual(moments.weight, 3.0)
+
+        weighted = Welford()
+        weighted.add(10.0, weight=0.0)
+        self.assertIsNone(weighted.mean)
+        weighted.add(10.0, weight=2.0)
+        weighted.add(20.0, weight=2.0)
+        self.assertEqual(weighted.weight, 4.0)
+        self.assertAlmostEqual(weighted.mean, 15.0)
+        with self.assertRaises(ValueError):
+            weighted.add(1.0, weight=-1.0)
 
         occupancy = TimedWelford(0, 2)
         occupancy.observe(1, 0)
         snapshot = occupancy.snapshot(4)
         self.assertEqual((snapshot.weight, snapshot.mean, snapshot.variance), (4, 0.5, 0.75))
         self.assertEqual(occupancy.snapshot(2).mean, 1)
+
+    def test_cli_path_validator_rejects_traversal_outside_cwd(self):
+        """Verifica che la validazione canonica del percorso CLI blocchi path traversal fuori dalla directory corrente."""
+        from simulator.__main__ import _resolve_scenario_path
+
+        with self.assertRaisesRegex(ValueError, 'fuori dalla directory'):
+            _resolve_scenario_path(Path('/etc/passwd'))
 
 
 if __name__ == '__main__':

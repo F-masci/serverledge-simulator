@@ -233,6 +233,63 @@ class TestActuatorAndLifecycle(unittest.TestCase):
         self.assertEqual(ring_act.scale_in_completed, 2)
         self.assertEqual(ring_act.remaining_quota, 3)
 
+    def test_scale_out_boot_time_hold_and_delayed_shutdown_lifecycle(self) -> None:
+        """Verifica il ciclo completo di scale-out con `boot_time_s > 0`, `HOLD` e scale-in con `shutdown_time_s > 0`.
+
+        - Un `HOLD` restituisce `CommandOutcome.COMPLETED` (no-op) senza alterare i nodi.
+        - Un `SCALE_OUT` con `boot_time_s=2.0` pianifica `NodeProvisionedEvent`: a `t=2.0` il nuovo
+          nodo entra nel ring (`len(ring) == 2`, `scale_out_completed == 1`) e l'energia di boot
+          viene integrata nella contabilità.
+        - Un `SCALE_IN` con `shutdown_time_s=1.0` pianifica `NodeDrainedEvent` e completa lo
+          spegnimento del nodo dopo 1s (`scale_in_completed == 1`, `draining_count == 0`).
+        """
+        scenario = _two_ring_scenario(
+            scaler={'mode': 'PPO', 'interval_s': 100.0},
+            x86_nodes=[{'name': 'x86-1'}],
+            x86_scaling={
+                'min_nodes': 1, 'max_nodes': 3,
+                'boot_time_s': 2.0, 'shutdown_time_s': 1.0,
+                'idle_power_w': 100.0, 'max_power_w': 200.0,
+            },
+            arm_nodes=[],
+            arm_scaling={'min_nodes': 0, 'max_nodes': 1},
+            arrival_rate=0.01,
+        )
+        sim = Simulation(scenario)
+        region = sim.regions['default']
+        scaler = region.scaler
+        assert isinstance(scaler, PPOScaler)
+        act = scaler.actuator
+        ring = region.infrastructure.rings['edge-x86']  # type: ignore[union-attr]
+
+        hold_cmd = ScalingCommand('h1', 1, None, ScalingActionKind.HOLD, act.state_version, 0.0)
+        self.assertEqual(act.execute(hold_cmd, now=0.0).outcome, CommandOutcome.COMPLETED)
+
+        out_cmd = ScalingCommand('o1', 2, 'edge-x86', ScalingActionKind.SCALE_OUT, act.state_version, 0.0)
+        out_res = act.execute(out_cmd, now=0.0)
+        self.assertEqual(out_res.outcome, CommandOutcome.IN_PROGRESS)
+        self.assertEqual(act.rings['edge-x86'].provisioning_count, 1)
+
+        engine = sim._ctx.engine
+        while engine.now < 2.0 and engine.step():
+            pass
+        self.assertEqual(len(ring), 2)
+        self.assertEqual(act.rings['edge-x86'].provisioning_count, 0)
+        self.assertEqual(act.rings['edge-x86'].scale_out_completed, 1)
+
+        in_cmd = ScalingCommand('i1', 3, 'edge-x86', ScalingActionKind.SCALE_IN, act.state_version, engine.now)
+        in_res = act.execute(in_cmd, now=engine.now)
+        self.assertEqual(in_res.outcome, CommandOutcome.IN_PROGRESS)
+        self.assertEqual(len(ring), 1)
+        self.assertEqual(act.rings['edge-x86'].draining_count, 1)
+
+        while engine.now < 3.0 and engine.step():
+            pass
+        self.assertEqual(act.rings['edge-x86'].draining_count, 0)
+        self.assertEqual(act.rings['edge-x86'].scale_in_completed, 1)
+        snap = scaler.accounting.close_interval(3.0)
+        self.assertGreater(snap.energy_kwh, 0.0)
+
 
 class TestAccountingAndReward(unittest.TestCase):
     """Verifica contabilità continua di energia K_t, attese/penalità D_t e reward a due termini."""

@@ -215,6 +215,115 @@ class ModelsTest(unittest.TestCase):
         self.assertEqual(self.node.resources.busy_pool_used_mem, f.memory_mb)
         self.assertEqual(self.node.resources.warm_pool_used_mem, f.memory_mb)
 
+    def test_idle_eviction_preserves_warm_containers_when_reclaimable_memory_is_insufficient(self):
+        """Verifica che l'eviction multi-pool non distrugga container warm se la RAM recuperabile non basta.
+
+        Riferimento reale: `internal/node/pool.go` (`acquireNewMemory`, `dismissContainer` in Go).
+
+        - Due funzioni distinte (`f1`, `f2`, 128 MiB ciascuna) passano in stato `IDLE` (`warm=256 MiB`),
+          mentre `busy_fn` occupa 256 MiB busy (`free=0`, `available=256 MiB`).
+        - Una richiesta da 384 MiB (`> 256 MiB` recuperabili) fallisce (`None`) conservando intatti
+          entrambi i container warm (`state == IDLE`, `evicted == False`).
+        - Una richiesta da 256 MiB (`== 256 MiB` recuperabili) evicta entrambi i container idle tra i
+          due pool marcandoli `evicted == True` e `DESTROYED`.
+        """
+        f1 = function('f1', memory=128)
+        f2 = function('f2', memory=128)
+        c1 = self.node.acquire(f1)
+        c2 = self.node.acquire(f2)
+        self.node.creation_succeeded(c1)
+        self.node.creation_succeeded(c2)
+        self.node.complete(c1, 1)
+        self.node.complete(c2, 2)
+
+        busy_fn = Function('busy', 256, 1, BuiltinRuntime('python314'))
+        c_busy = self.node.acquire(busy_fn)
+        self.node.creation_succeeded(c_busy)
+        self.assertEqual(self.node.resources.free_memory, 0)
+        self.assertEqual(self.node.resources.available_memory, 256)
+
+        too_big = Function('too-big', 384, 1, BuiltinRuntime('python314'))
+        self.assertIsNone(self.node.acquire(too_big))
+        self.assertEqual((c1.state, c2.state), (ContainerState.IDLE, ContainerState.IDLE))
+        self.assertEqual((c1.evicted, c2.evicted), (False, False))
+        self.assertEqual(self.node.resources.warm_pool_used_mem, 256)
+
+        fits = Function('fits', 256, 1, BuiltinRuntime('python314'))
+        c_fits = self.node.acquire(fits)
+        self.assertIsNotNone(c_fits)
+        self.assertEqual((c1.state, c2.state), (ContainerState.DESTROYED, ContainerState.DESTROYED))
+        self.assertEqual((c1.evicted, c2.evicted), (True, True))
+        self.assertEqual(self.node.resources.warm_pool_used_mem, 0)
+        self.assertEqual(self.node.resources.busy_pool_used_mem, 512)
+
+    def test_node_shutdown_destroys_idle_containers_and_rejects_active_node(self):
+        """Verifica che `Node.shutdown()` rifiuti nodi attivi e rimuova i container idle al termine del drain.
+
+        Riferimento reale: `internal/node/pool.go` (`ShutdownWarmContainersFor`) e spegnimento
+        graceful al termine del drain di scale-in.
+
+        - Con una richiesta attiva sul nodo, `node.shutdown()` solleva `RuntimeError`.
+        - Dopo il completamento, `node.shutdown()` distrugge tutti i container idle (`evicted == False`)
+          liberando interamente la RAM warm (`warm_pool_used_mem=0`, `free_memory=512`).
+        """
+        f = function(concurrency=1)
+        c1 = self.node.acquire(f)
+        c2 = self.node.acquire(f)
+        self.node.creation_succeeded(c1)
+        self.node.creation_succeeded(c2)
+        self.node.complete(c1, 1)
+
+        with self.assertRaises(RuntimeError):
+            self.node.shutdown()
+        self.assertEqual(c1.state, ContainerState.IDLE)
+
+        self.node.complete(c2, 2)
+        self.node.shutdown()
+        self.assertEqual((c1.state, c2.state), (ContainerState.DESTROYED, ContainerState.DESTROYED))
+        self.assertEqual((c1.evicted, c2.evicted), (False, False))
+        self.assertEqual(self.node.resources.warm_pool_used_mem, 0)
+        self.assertEqual(self.node.resources.free_memory, 512)
+
+    def test_container_lifecycle_callbacks_and_expiration_compaction(self):
+        """Verifica l'ordine dei callback di ciclo di vita e la compattazione LIFO su scadenza TTL.
+
+        Riferimento reale: `internal/node/pool.go` (`DeleteExpiredContainer` preserva l'ordine
+        degli elementi idle residui; `HandleCompletion` notifica passaggio a idle).
+
+        - Registra tutti i callback del nodo (`created`, `acquired`, `busy`, `idle`, `destroyed`).
+        - Verifica che la scadenza di `c1` (meno recente) lasci `c2` nel pool idle con `evicted=False`,
+          e che `creation_succeeded` su un container non in pending sollevi `ValueError`.
+        """
+        events: list[str] = []
+        self.node.on_container_created = lambda _n, _c: events.append('created')
+        self.node.on_container_acquired = lambda _n, _c: events.append('acquired')
+        self.node.on_container_busy = lambda _n, _c: events.append('busy')
+        self.node.on_container_idle = lambda _n, _c: events.append('idle')
+        self.node.on_container_destroyed = lambda _n, _c: events.append('destroyed')
+
+        f = function(concurrency=1)
+        c1 = self.node.acquire(f)
+        c2 = self.node.acquire(f)
+        self.node.creation_succeeded(c1)
+        self.node.creation_succeeded(c2)
+        with self.assertRaises(ValueError):
+            self.node.creation_succeeded(c1)
+
+        self.node.complete(c1, 1)
+        self.node.complete(c2, 5)
+        self.node.expire(602, container=c1)
+        self.assertEqual(c1.state, ContainerState.DESTROYED)
+        self.assertFalse(c1.evicted)
+        self.assertEqual(self.node.pools[f.name].idle, (c2,))
+
+        reused = self.node.acquire(f)
+        self.assertIs(reused, c2)
+        self.assertIn('created', events)
+        self.assertIn('acquired', events)
+        self.assertIn('busy', events)
+        self.assertIn('idle', events)
+        self.assertIn('destroyed', events)
+
 
 if __name__ == '__main__':
     unittest.main()

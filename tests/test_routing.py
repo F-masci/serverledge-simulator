@@ -502,6 +502,115 @@ class RoutingTest(unittest.TestCase):
         self.assertFalse(lb_ideal.resource_cache_enabled)
         self.assertEqual(lb_ideal.refresh_interval_s, 5.0)
 
+    def test_lb_periodic_refresh_reconciles_drift_and_ignores_stale_timestamps(self):
+        """Verifica il polling periodico `/status` (`LoadBalancerRefreshEvent`) e la guardia su timestamp obsoleti.
+
+        Riproduce `TestTargetRefreshPollsOnceAndReplacesChangedMetadata` in
+        `internal/test/load_balancer_test.go` e `refreshTargets` in `internal/lb/lb.go`.
+
+        - Nella cache `NodeMetricCache`, un `reconcile` con `now < last_update_s` viene ignorato
+          per non sovrascrivere aggiornamenti più recenti, mentre `refresh_all` rimuove i nodi
+          non più presenti nella topologia.
+        - In una `Simulation` con `load_balancer_refresh_interval_s=2.0`, `LoadBalancerRefreshEvent`
+          esegue il polling periodico a `t=2.0` e `t=4.0`, riallineando la cache dopo una deriva
+          manuale senza bloccare il calendario.
+        """
+        from simulator.core.simulation import Simulation
+        from simulator.io.scenario import Scenario
+        from simulator.model.execution.function import FunctionProfile
+
+        # 1. Verifica unità su NodeMetricCache: guardia timestamp e pruning nodi rimossi.
+        cache = NodeMetricCache()
+        n1 = Node('n1', 256, 2.0, 'amd64')
+        n2 = Node('n2', 256, 2.0, 'amd64')
+        cache.register(n1, now=10.0)
+        cache.register(n2, now=10.0)
+        cache.reserve(n1, function(), now=10.0)
+        self.assertEqual(cache.get(n1).free_cpus, 1.0)
+        # Reconcile con timestamp precedente (now=5.0 < 10.0) ignorato.
+        cache.reconcile(n1, now=5.0)
+        self.assertEqual(cache.get(n1).free_cpus, 1.0)
+        # refresh_all su [n1] a t=12.0 riallinea n1 e rimuove n2 dalla cache.
+        cache.refresh_all([n1], now=12.0)
+        self.assertEqual(cache.get(n1).free_cpus, 2.0)
+        self.assertIsNone(cache.get(n2))
+
+        # 2. Verifica integrazione LoadBalancerRefreshEvent in Simulation.
+        fn = Function(
+            'hello', 128, 1.0, BuiltinRuntime('python314'),
+            profile=FunctionProfile(
+                arrival_rate=0.2, service_rate=2.0, first_arrival_time=0.0,
+                arrival_distribution='deterministic', service_distribution='deterministic',
+            ),
+        )
+        infra_cfg = {'rings': [{'id': 'r', 'arch': 'amd64', 'memory_mb': 256, 'cpus': 2.0, 'nodes': [{'name': 'n1'}]}]}
+        scenario = Scenario(
+            (fn,), infrastructure=infra_cfg,
+            load_balancer_resource_cache=True, load_balancer_refresh_interval_s=2.0,
+        )
+        sim = Simulation(scenario)
+        sim.run(arrivals=1)
+        infra = sim.regions['default'].infrastructure
+        node = infra.resolve_node('n1')
+        lb = infra.load_balancer
+        # Introduce una deriva artificiale nella cache e avanza fino al tick di refresh (t=2.0).
+        lb._metric_cache.reserve(node, fn, now=1.0)
+        self.assertLess(lb._metric_cache.get(node).free_cpus, 2.0)
+        engine = sim._ctx.engine
+        while engine.now < 2.0:
+            self.assertTrue(engine.step())
+        self.assertEqual(lb._metric_cache.get(node).free_cpus, 2.0)
+
+    def test_machine_tag_escaped_re2_and_capability_matching_edge_cases(self):
+        """Verifica edge case del validatore RE2 (backslash escapati) e del matching per termini/capability.
+
+        Riferimento reale: `internal/api/api.go` (`normalizeTagPatternForAPI`) e
+        `internal/lb/generalLoadBalancer.go` (`matchesMachineTag`).
+
+        - Un carattere `(` o `1` preceduto da backslash dispari (`\\(?=foo)`, `\\\\1`) non è un
+          costrutto PCRE proibito e viene accettato; preceduto da backslash pari (`\\\\(?=foo)`,
+          `\\\\\\1`) attiva il costrutto PCRE e viene rifiutato con `ValueError`.
+        - Requisiti vuoti tra virgole (`'x86, , gpu'`) vengono ignorati; un prefisso di
+          architettura seguito da `/` (`'arm/gpu'`) vincola la parte base del tag.
+        """
+        from simulator.utils.machine_tag import matches_machine_tag, validate_tag_pattern
+
+        # Costrutti escapati validi in RE2.
+        for valid in (r'^x86\(?=gpu\)$', r'^x86\\1$', r'^x86(?P<g>gpu)$'):
+            with self.subTest(valid=valid):
+                validate_tag_pattern(valid)
+
+        # Costrutti PCRE non escapati (even backslashes) rifiutati.
+        for invalid in (r'^x86\\(?=gpu)$', r'^(x86)\\\1$', r'^x86(?<=a)b$'):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, 'tag_pattern'):
+                validate_tag_pattern(invalid)
+
+        self.assertTrue(matches_machine_tag('x86-large/gpu/nvidia', 'x86, , gpu'))
+        self.assertTrue(matches_machine_tag('x86-large/gpu/nvidia', 'gpu/nvidia'))
+        self.assertFalse(matches_machine_tag('x86-large/gpu/nvidia', 'arm/gpu'))
+        self.assertFalse(matches_machine_tag('x86-large/gpu/nvidia', '^[invalid'))
+        self.assertTrue(matches_machine_tag('amd64', 'default'))
+
+    def test_ring_direct_submit_and_unregistered_cache_node(self):
+        """Verifica `ArchitectureRing.submit` e l'ammissione ottimistica in cache per nodi non ancora registrati.
+
+        Riferimento reale: `internal/lb/hashRing.go` (`HashRing.Get`) e `internal/lb/lb.go`
+        (un nodo non ancora in `NodeMetrics` è ammesso ottimisticamente e registrato al primo `reserve`).
+        """
+        infra = Infrastructure()
+        ring = infra.create_ring('r', arch='amd64', memory=256, cpus=1)
+        node = infra.create_node('r', 'n1')
+
+        req = Request(function())
+        self.assertIs(ring.submit(req), node)
+        self.assertIs(req.status, RequestStatus.ACCEPTED)
+
+        cache = NodeMetricCache()
+        unregistered = Node('ghost', 256, 1.0, 'amd64')
+        self.assertTrue(cache.has_enough_resources(unregistered, function()))
+        cache.reserve(unregistered, function(), now=1.0)
+        self.assertEqual(cache.get(unregistered).free_cpus, 0.0)
+
 
 if __name__ == '__main__':
     unittest.main()
