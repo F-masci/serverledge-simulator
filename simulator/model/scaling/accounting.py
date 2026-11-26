@@ -95,12 +95,12 @@ class RegionAccounting:
         self._pending: dict[str, tuple[float, str | None]] = {}
 
         # Accumulatori di intervallo per ring e totali regionali.
-        self._interval_energy_j_by_ring: dict[str, float] = {r: 0.0 for r in actuator.ring_order}
-        self._interval_alloc_by_ring: dict[str, float] = {r: 0.0 for r in actuator.ring_order}
-        self._interval_wait_req_s_by_ring: dict[str, float] = {r: 0.0 for r in actuator.ring_order}
-        self._interval_rej_pen_by_ring: dict[str, float] = {r: 0.0 for r in actuator.ring_order}
-        self._interval_arrivals_by_ring: dict[str, int] = {r: 0 for r in actuator.ring_order}
-        self._interval_rejections_by_ring: dict[str, int] = {r: 0 for r in actuator.ring_order}
+        self._interval_energy_j_by_ring: dict[str, float] = dict.fromkeys(actuator.ring_order, 0.0)
+        self._interval_alloc_by_ring: dict[str, float] = dict.fromkeys(actuator.ring_order, 0.0)
+        self._interval_wait_req_s_by_ring: dict[str, float] = dict.fromkeys(actuator.ring_order, 0.0)
+        self._interval_rej_pen_by_ring: dict[str, float] = dict.fromkeys(actuator.ring_order, 0.0)
+        self._interval_arrivals_by_ring: dict[str, int] = dict.fromkeys(actuator.ring_order, 0)
+        self._interval_rejections_by_ring: dict[str, int] = dict.fromkeys(actuator.ring_order, 0)
         self._interval_wait_req_s_total = 0.0
         self._interval_rej_pen_total = 0.0
 
@@ -113,8 +113,8 @@ class RegionAccounting:
         self.total_d_cost_req_s = 0.0
         self.total_reward = 0.0
         self.intervals_closed = 0
-        self.total_energy_kwh_by_ring: dict[str, float] = {r: 0.0 for r in actuator.ring_order}
-        self.total_d_cost_by_ring: dict[str, float] = {r: 0.0 for r in actuator.ring_order}
+        self.total_energy_kwh_by_ring: dict[str, float] = dict.fromkeys(actuator.ring_order, 0.0)
+        self.total_d_cost_by_ring: dict[str, float] = dict.fromkeys(actuator.ring_order, 0.0)
 
         # Encoder e calcolatore reward condivisi con il core indipendente dal simulatore.
         self._encoder = ObservationEncoder(
@@ -145,7 +145,12 @@ class RegionAccounting:
         dt = now - self._last_time_s
         self._last_time_s = now
 
-        # 1. Energia e costo di allocazione dei nodi pronti e in drain.
+        self._advance_active_nodes(dt)
+        self._advance_provisioning_nodes(dt)
+        self._advance_pending_requests(dt)
+
+    def _advance_active_nodes(self, dt: float) -> None:
+        """Integra energia e costo di allocazione dei nodi pronti e in drain."""
         for state in self._node_power.values():
             ring_id = state.ring_id
             self._interval_energy_j_by_ring[ring_id] += self._instant_power_w(state) * dt
@@ -153,25 +158,29 @@ class RegionAccounting:
             if alloc_rate > 0.0:
                 self._interval_alloc_by_ring[ring_id] += alloc_rate * dt
 
-        # 2. Energia e costo di allocazione dei nodi in acquisizione/boot.
+    def _advance_provisioning_nodes(self, dt: float) -> None:
+        """Integra energia e costo di allocazione dei nodi in fase di boot."""
         for ring_id, ring_act in self._actuator.rings.items():
             prov_count = ring_act.provisioning_count
-            if prov_count > 0:
-                self._interval_energy_j_by_ring[ring_id] += (
-                    prov_count * ring_act.config.effective_boot_power_w * dt
+            if prov_count <= 0:
+                continue
+            self._interval_energy_j_by_ring[ring_id] += (
+                prov_count * ring_act.config.effective_boot_power_w * dt
+            )
+            if ring_act.config.allocation_cost_per_s > 0.0:
+                self._interval_alloc_by_ring[ring_id] += (
+                    prov_count * ring_act.config.allocation_cost_per_s * dt
                 )
-                if ring_act.config.allocation_cost_per_s > 0.0:
-                    self._interval_alloc_by_ring[ring_id] += (
-                        prov_count * ring_act.config.allocation_cost_per_s * dt
-                    )
 
-        # 3. Integrale continuo delle richieste pendenti N_pendenti(u) du.
+    def _advance_pending_requests(self, dt: float) -> None:
+        """Integra il numero di richieste pendenti nel periodo `dt`."""
         n_pending = len(self._pending)
-        if n_pending > 0:
-            self._interval_wait_req_s_total += n_pending * dt
-            for _, ring_id in self._pending.values():
-                if ring_id is not None and ring_id in self._interval_wait_req_s_by_ring:
-                    self._interval_wait_req_s_by_ring[ring_id] += dt
+        if n_pending <= 0:
+            return
+        self._interval_wait_req_s_total += n_pending * dt
+        for _, ring_id in self._pending.values():
+            if ring_id is not None and ring_id in self._interval_wait_req_s_by_ring:
+                self._interval_wait_req_s_by_ring[ring_id] += dt
 
     ### Actuator Hooks ###
 
@@ -185,106 +194,110 @@ class RegionAccounting:
     def on_notification(self, notification: Notification) -> None:
         """Aggiorna in tempo continuo contabilità energetica, richieste pendenti e drain."""
         now = notification.sim_time_s
-        region_name = self._region.name
-
         match notification:
             case NodeRegistered():
-                if notification.region.name != region_name:
-                    return
-                self.advance_to(now)
-                self._node_power[notification.node.key] = _NodePowerState(
-                    ring_id=notification.ring.id,
-                    used_cpus=notification.resources.used_cpus,
-                    total_cpus=notification.resources.total_cpus,
-                    draining=False,
-                )
-
+                self._on_node_registered(notification, now)
             case NodeRemoved():
-                if notification.region.name != region_name:
-                    return
-                self.advance_to(now)
-                state = self._node_power.get(notification.node.key)
-                if state is not None:
-                    state.draining = True
-                    state.used_cpus = notification.resources.used_cpus
-
+                self._on_node_removed(notification, now)
             case ContainerStateChanged():
-                if notification.region is None or notification.region.name != region_name:
-                    return
-                self.advance_to(now)
-                state = self._node_power.get(notification.node.key)
-                if state is not None and notification.resources is not None:
-                    state.used_cpus = notification.resources.used_cpus
-                self._actuator.check_node_drain(notification.node, now)
-
+                self._on_container_state_changed(notification, now)
             case RequestArrived():
-                if notification.region is None or notification.region.name != region_name:
-                    return
-                self.advance_to(now)
-                self._pending[notification.request.id] = (now, None)
-
+                self._on_request_arrived(notification, now)
             case RequestDelivered():
-                if notification.region is None or notification.region.name != region_name:
-                    return
-                self.advance_to(now)
-                self._pending.setdefault(notification.request.id, (now, None))
-
+                self._on_request_delivered(notification, now)
             case RequestForwarded():
-                if notification.source_region.name != region_name:
-                    return
-                self.advance_to(now)
-                self._pending.pop(notification.request.id, None)
-
-            case RequestQueued():
-                if notification.region is None or notification.region.name != region_name:
-                    return
-                self.advance_to(now)
-                ring_id = notification.ring.id if notification.ring is not None else None
-                enter_t, prev_ring = self._pending.get(notification.request.id, (now, None))
-                self._pending[notification.request.id] = (enter_t, ring_id)
-                if prev_ring is None and ring_id in self._interval_arrivals_by_ring:
-                    self._interval_arrivals_by_ring[ring_id] += 1
-
-            case RequestAccepted():
-                if notification.region is None or notification.region.name != region_name:
-                    return
-                self.advance_to(now)
-                ring_id = notification.ring.id if notification.ring is not None else None
-                enter_t, prev_ring = self._pending.get(notification.request.id, (now, None))
-                self._pending[notification.request.id] = (enter_t, ring_id)
-                if prev_ring is None and ring_id in self._interval_arrivals_by_ring:
-                    self._interval_arrivals_by_ring[ring_id] += 1
-
+                self._on_request_forwarded(notification, now)
+            case RequestQueued() | RequestAccepted():
+                self._on_request_assigned(notification, now)
             case RequestCompleted():
-                if notification.request.id in self._pending:
-                    self.advance_to(now)
-                    self._pending.pop(notification.request.id, None)
-                if (
-                    notification.node is not None
-                    and notification.region is not None
-                    and notification.region.name == region_name
-                ):
-                    self._actuator.check_node_drain(notification.node, now)
-
+                self._on_request_completed(notification, now)
             case RequestRejected():
-                if notification.request.id not in self._pending and (
-                    notification.region is None or notification.region.name != region_name
-                ):
-                    return
-                self.advance_to(now)
-                entry = self._pending.pop(notification.request.id, None)
-                enter_t = entry[0] if entry is not None else now
-                ring_id = (
-                    notification.ring.id
-                    if notification.ring is not None
-                    else (entry[1] if entry is not None else None)
-                )
-                age = max(0.0, now - enter_t)
-                penalty = max(0.0, self._reward_config.timeout_penalty_s - age)
-                self._interval_rej_pen_total += penalty
-                if ring_id is not None and ring_id in self._interval_rej_pen_by_ring:
-                    self._interval_rej_pen_by_ring[ring_id] += penalty
-                    self._interval_rejections_by_ring[ring_id] += 1
+                self._on_request_rejected(notification, now)
+
+    def _on_node_registered(self, notification: NodeRegistered, now: float) -> None:
+        if notification.region.name != self._region.name:
+            return
+        self.advance_to(now)
+        self._node_power[notification.node.key] = _NodePowerState(
+            ring_id=notification.ring.id,
+            used_cpus=notification.resources.used_cpus,
+            total_cpus=notification.resources.total_cpus,
+            draining=False,
+        )
+
+    def _on_node_removed(self, notification: NodeRemoved, now: float) -> None:
+        if notification.region.name != self._region.name:
+            return
+        self.advance_to(now)
+        state = self._node_power.get(notification.node.key)
+        if state is not None:
+            state.draining = True
+            state.used_cpus = notification.resources.used_cpus
+
+    def _on_container_state_changed(self, notification: ContainerStateChanged, now: float) -> None:
+        if notification.region is None or notification.region.name != self._region.name:
+            return
+        self.advance_to(now)
+        state = self._node_power.get(notification.node.key)
+        if state is not None and notification.resources is not None:
+            state.used_cpus = notification.resources.used_cpus
+        self._actuator.check_node_drain(notification.node, now)
+
+    def _on_request_arrived(self, notification: RequestArrived, now: float) -> None:
+        if notification.region is None or notification.region.name != self._region.name:
+            return
+        self.advance_to(now)
+        self._pending[notification.request.id] = (now, None)
+
+    def _on_request_delivered(self, notification: RequestDelivered, now: float) -> None:
+        if notification.region is None or notification.region.name != self._region.name:
+            return
+        self.advance_to(now)
+        self._pending.setdefault(notification.request.id, (now, None))
+
+    def _on_request_forwarded(self, notification: RequestForwarded, now: float) -> None:
+        if notification.source_region.name != self._region.name:
+            return
+        self.advance_to(now)
+        self._pending.pop(notification.request.id, None)
+
+    def _on_request_assigned(self, notification: RequestQueued | RequestAccepted, now: float) -> None:
+        if notification.region is None or notification.region.name != self._region.name:
+            return
+        self.advance_to(now)
+        ring_id = notification.ring.id if notification.ring is not None else None
+        enter_t, prev_ring = self._pending.get(notification.request.id, (now, None))
+        self._pending[notification.request.id] = (enter_t, ring_id)
+        if prev_ring is None and ring_id in self._interval_arrivals_by_ring:
+            self._interval_arrivals_by_ring[ring_id] += 1
+
+    def _on_request_completed(self, notification: RequestCompleted, now: float) -> None:
+        if notification.request.id in self._pending:
+            self.advance_to(now)
+            self._pending.pop(notification.request.id, None)
+        if (
+            notification.node is not None
+            and notification.region is not None
+            and notification.region.name == self._region.name
+        ):
+            self._actuator.check_node_drain(notification.node, now)
+
+    def _on_request_rejected(self, notification: RequestRejected, now: float) -> None:
+        if notification.request.id not in self._pending and (
+            notification.region is None or notification.region.name != self._region.name
+        ):
+            return
+        self.advance_to(now)
+        entry = self._pending.pop(notification.request.id, None)
+        enter_t = entry[0] if entry is not None else now
+        fallback_ring = entry[1] if entry is not None else None
+        ring_id = notification.ring.id if notification.ring is not None else fallback_ring
+        age = max(0.0, now - enter_t)
+        penalty = max(0.0, self._reward_config.timeout_penalty_s - age)
+        self._interval_rej_pen_total += penalty
+        if ring_id is not None and ring_id in self._interval_rej_pen_by_ring:
+            self._interval_rej_pen_by_ring[ring_id] += penalty
+            self._interval_rejections_by_ring[ring_id] += 1
 
     ### Interval Closure & Observation Construction ###
 

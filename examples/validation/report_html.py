@@ -60,6 +60,15 @@ def _fmt_pct(value: float | None) -> str:
     return f"{value:.1f}%"
 
 
+_SVG_CLOSE = "</svg>"
+
+
+def _delta_class(diff: float, neutral_threshold: float) -> str:
+    if abs(diff) < neutral_threshold:
+        return "neutral"
+    return "warn" if diff > 0 else "good"
+
+
 def _fmt_delta(sim: float | None, real: float | None, unit: str = "s") -> str:
     if sim is None or real is None:
         return '<span class="delta muted">n.d.</span>'
@@ -68,11 +77,11 @@ def _fmt_delta(sim: float | None, real: float | None, unit: str = "s") -> str:
     if unit == "s":
         text = f"{sign}{diff * 1000:.1f} ms"
         pct = f" ({sign}{(diff / sim) * 100:.1f}%)" if sim > 1e-9 else ""
-        cls = "neutral" if abs(diff) < 0.05 else ("warn" if diff > 0 else "good")
+        cls = _delta_class(diff, 0.05)
         return f'<span class="delta {cls}">{escape(text + pct)}</span>'
     if unit == "%":
         text = f"{sign}{diff:.1f} pp"
-        cls = "neutral" if abs(diff) < 5.0 else ("warn" if diff > 0 else "good")
+        cls = _delta_class(diff, 5.0)
         return f'<span class="delta {cls}">{escape(text)}</span>'
     text = f"{sign}{int(round(diff))}"
     cls = "neutral" if diff == 0 else "info"
@@ -127,8 +136,36 @@ def _svg_stacked_outcomes(sim: MetricSummary, real: MetricSummary) -> str:
         parts.append(f'<rect x="{lx}" y="{ly - 10}" width="11" height="11" rx="2" fill="{color}" />')
         parts.append(f'<text x="{lx + 16}" y="{ly}" class="svg-legend">{escape(name)}</text>')
         lx += 94
-    parts.append("</svg>")
+    parts.append(_SVG_CLOSE)
     return "".join(parts)
+
+
+def _svg_bar_elements(
+    name: str,
+    bx: float,
+    bar_w: float,
+    val: float | None,
+    max_val: float,
+    margin_t: int,
+    plot_h: int,
+    color: str,
+    sys_name: str,
+    unit: str,
+) -> list[str]:
+    """Costruisce gli elementi SVG di una singola barra (o segnaposto `n.d.`)."""
+    if val is None:
+        return [
+            f'<text x="{bx + bar_w / 2:.1f}" y="{margin_t + plot_h - 4:.1f}" '
+            f'text-anchor="middle" class="svg-na">n.d.</text>'
+        ]
+    bh = max(2.0, (val / max_val) * plot_h)
+    by = margin_t + plot_h - bh
+    fmt = f"{val:.0f}%" if unit == "%" else f"{val:.2f}s"
+    return [
+        f'<rect x="{bx:.1f}" y="{by:.1f}" width="{bar_w:.1f}" height="{bh:.1f}" rx="3" fill="{color}">'
+        f'<title>{escape(name)} ({sys_name}): {fmt}</title></rect>',
+        f'<text x="{bx + bar_w / 2:.1f}" y="{by - 4:.1f}" text-anchor="middle" class="svg-val">{fmt}</text>',
+    ]
 
 
 def _svg_grouped_bars(
@@ -144,26 +181,29 @@ def _svg_grouped_bars(
     plot_h = height - margin_t - margin_b
 
     values = [v for _, s, r in items for v in (s, r) if v is not None]
-    max_val = max_override if max_override is not None else (max(values) * 1.18 if values else 1.0)
+    computed_max = max(values) * 1.18 if values else 1.0
+    max_val = max_override if max_override is not None else computed_max
     if max_val <= 0:
         max_val = 1.0
 
-    parts = [f'<svg class="chart-svg" viewBox="0 0 {width} {height}" role="img">']
-    # Legenda in alto
-    parts.append(f'<rect x="{margin_l}" y="6" width="11" height="11" rx="2" fill="#2563eb" />')
-    parts.append(f'<text x="{margin_l + 16}" y="15" class="svg-legend">Simulatore</text>')
-    parts.append(f'<rect x="{margin_l + 96}" y="6" width="11" height="11" rx="2" fill="#f97316" />')
-    parts.append(f'<text x="{margin_l + 112}" y="15" class="svg-legend">Reale</text>')
+    parts = [
+        f'<svg class="chart-svg" viewBox="0 0 {width} {height}" role="img">',
+        f'<rect x="{margin_l}" y="6" width="11" height="11" rx="2" fill="#2563eb" />',
+        f'<text x="{margin_l + 16}" y="15" class="svg-legend">Simulatore</text>',
+        f'<rect x="{margin_l + 96}" y="6" width="11" height="11" rx="2" fill="#f97316" />',
+        f'<text x="{margin_l + 112}" y="15" class="svg-legend">Reale</text>',
+    ]
 
-    # Griglia orizzontale
     ticks = 4
     for i in range(ticks + 1):
         frac = i / ticks
         y = margin_t + plot_h * (1 - frac)
         val = max_val * frac
         label = f"{val:.0f}%" if unit == "%" else f"{val:.2f}"
-        parts.append(f'<line x1="{margin_l}" y1="{y:.1f}" x2="{width - margin_r}" y2="{y:.1f}" class="svg-grid" />')
-        parts.append(f'<text x="{margin_l - 8}" y="{y + 4:.1f}" text-anchor="end" class="svg-axis">{label}</text>')
+        parts.extend((
+            f'<line x1="{margin_l}" y1="{y:.1f}" x2="{width - margin_r}" y2="{y:.1f}" class="svg-grid" />',
+            f'<text x="{margin_l - 8}" y="{y + 4:.1f}" text-anchor="end" class="svg-axis">{label}</text>',
+        ))
 
     count = max(len(items), 1)
     group_w = plot_w / count
@@ -176,28 +216,14 @@ def _svg_grouped_bars(
             (-(bar_w + gap / 2), sim_v, "#2563eb", "Simulatore"),
             (gap / 2, real_v, "#f97316", "Reale"),
         ):
-            bx = cx + offset
-            if val is None:
-                parts.append(
-                    f'<text x="{bx + bar_w / 2:.1f}" y="{margin_t + plot_h - 4:.1f}" '
-                    f'text-anchor="middle" class="svg-na">n.d.</text>'
-                )
-            else:
-                bh = max(2.0, (val / max_val) * plot_h)
-                by = margin_t + plot_h - bh
-                fmt = f"{val:.0f}%" if unit == "%" else f"{val:.2f}s"
-                parts.append(
-                    f'<rect x="{bx:.1f}" y="{by:.1f}" width="{bar_w:.1f}" height="{bh:.1f}" rx="3" fill="{color}">'
-                    f'<title>{escape(name)} ({sys_name}): {fmt}</title></rect>'
-                )
-                parts.append(
-                    f'<text x="{bx + bar_w / 2:.1f}" y="{by - 4:.1f}" text-anchor="middle" class="svg-val">{fmt}</text>'
-                )
+            parts.extend(_svg_bar_elements(
+                name, cx + offset, bar_w, val, max_val, margin_t, plot_h, color, sys_name, unit,
+            ))
         parts.append(
             f'<text x="{cx:.1f}" y="{height - 16}" text-anchor="middle" class="svg-label">{escape(name)}</text>'
         )
 
-    parts.append("</svg>")
+    parts.append(_SVG_CLOSE)
     return "".join(parts)
 
 
@@ -221,16 +247,16 @@ def _svg_node_distribution(node_counts: list[tuple[str, str, int]]) -> str:
         y = 14 + idx * row_h
         w = max(4.0, (count / max_c) * bar_w)
         color = area_colors.get(area, "#64748b")
-        parts.append(f'<text x="{bar_x - 10}" y="{y + 15}" text-anchor="end" class="svg-label-bold">{escape(node)}</text>')
-        parts.append(f'<rect x="{bar_x}" y="{y + 2}" width="{bar_w}" height="18" rx="4" fill="#f1f5f9" />')
-        parts.append(
-            f'<rect x="{bar_x}" y="{y + 2}" width="{w:.1f}" height="18" rx="4" fill="{color}">'
-            f'<title>{escape(node)} ({escape(area)}): {count} richieste</title></rect>'
-        )
-        parts.append(
-            f'<text x="{bar_x + bar_w + 10}" y="{y + 15}" class="svg-muted">{count} ({escape(area)})</text>'
-        )
-    parts.append("</svg>")
+        parts.extend((
+            f'<text x="{bar_x - 10}" y="{y + 15}" text-anchor="end" class="svg-label-bold">{escape(node)}</text>',
+            f'<rect x="{bar_x}" y="{y + 2}" width="{bar_w}" height="18" rx="4" fill="#f1f5f9" />',
+            (
+                f'<rect x="{bar_x}" y="{y + 2}" width="{w:.1f}" height="18" rx="4" fill="{color}">'
+                f'<title>{escape(node)} ({escape(area)}): {count} richieste</title></rect>'
+            ),
+            f'<text x="{bar_x + bar_w + 10}" y="{y + 15}" class="svg-muted">{count} ({escape(area)})</text>',
+        ))
+    parts.append(_SVG_CLOSE)
     return "".join(parts)
 
 
@@ -252,51 +278,18 @@ def _format_placement_pills(outcomes: list[Any], *, pill_cls: str) -> str:
     return '<div class="pill-list">' + "".join(pills) + "</div>"
 
 
-def render_html_report(
-    *,
-    scenario_path: Path,
-    results_path: Path,
-    seed: int,
-    cutoff_s: float,
-    arrivals: list[Any],
-    rows: dict[int, dict[str, Any]],
-    simulated_outcomes: list[Any],
-    real_outcomes: list[Any],
-) -> str:
-    """Costruisce una pagina HTML autonoma con CSS e grafici SVG integrati."""
-    sim_total = compute_metrics(simulated_outcomes)
-    real_total = compute_metrics(real_outcomes)
-    fn_names = sorted({item.function for item in arrivals})
-    per_fn = {
-        name: (
-            compute_metrics([o for o in simulated_outcomes if o.function == name]),
-            compute_metrics([o for o in real_outcomes if o.function == name]),
-        )
-        for name in fn_names
-    }
-
-    # Distribuzione ExecutionNode dal replay reale
+def _collect_node_counts(rows: dict[int, dict[str, Any]]) -> list[tuple[str, str, int]]:
+    """Aggrega i conteggi `(ExecutionNode, ExecutionArea)` dal replay reale."""
     node_area_counter: Counter[tuple[str, str]] = Counter()
     for row in rows.values():
         resp = row.get("response")
         if row.get("success") and isinstance(resp, dict) and resp.get("ExecutionNode"):
             node_area_counter[(str(resp["ExecutionNode"]), str(resp.get("ExecutionArea") or "-"))] += 1
-    node_counts = [(node, area, count) for (node, area), count in node_area_counter.most_common()]
+    return [(node, area, count) for (node, area), count in node_area_counter.most_common()]
 
-    real_final_ok = sum(1 for row in rows.values() if row.get("success"))
-    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Grafici SVG
-    chart_outcomes = _svg_stacked_outcomes(sim_total, real_total)
-    chart_resp = _svg_grouped_bars([(n, per_fn[n][0].mean_response_s, per_fn[n][1].mean_response_s) for n in fn_names], "s")
-    chart_p95 = _svg_grouped_bars([(n, per_fn[n][0].p95_response_s, per_fn[n][1].p95_response_s) for n in fn_names], "s")
-    chart_cold = _svg_grouped_bars(
-        [(n, per_fn[n][0].cold_pct, per_fn[n][1].cold_pct) for n in fn_names], "%", max_override=100.0
-    )
-    chart_service = _svg_grouped_bars([(n, per_fn[n][0].mean_service_s, per_fn[n][1].mean_service_s) for n in fn_names], "s")
-    chart_nodes = _svg_node_distribution(node_counts)
-
-    # Righe tabella per funzione
+def _build_fn_rows_html(fn_names: list[str], per_fn: dict[str, tuple[MetricSummary, MetricSummary]]) -> list[str]:
+    """Costruisce le righe HTML della tabella comparativa per funzione."""
     fn_rows_html = []
     for name in fn_names:
         s, r = per_fn[name]
@@ -329,8 +322,13 @@ def render_html_report(
               <td class="num">{_fmt_sec(r.mean_service_s)}</td>
             </tr>"""
         )
+    return fn_rows_html
 
-    # Righe tabella placement e forwarding (Simulatore vs Reale)
+
+def _build_placement_rows_html(
+    fn_names: list[str], simulated_outcomes: list[Any], real_outcomes: list[Any],
+) -> list[str]:
+    """Costruisce le righe HTML della tabella di confronto placement/forwarding."""
     placement_rows_html = []
     for name in fn_names:
         sim_fn = [o for o in simulated_outcomes if o.function == name]
@@ -352,28 +350,36 @@ def render_html_report(
               <td>{match_badge}</td>
             </tr>"""
         )
+    return placement_rows_html
 
-    # Righe dettaglio richieste reali
+
+def _format_start_badge(warm_val: Any) -> str:
+    if warm_val is True:
+        return '<span class="pill pill-warm">Warm</span>'
+    if warm_val is False:
+        return '<span class="pill pill-cold">Cold</span>'
+    return '<span class="muted">-</span>'
+
+
+def _classify_request_status(row: dict[str, Any], cutoff_s: float) -> tuple[str, str]:
+    end = row["sent_s"] + row["response_s"]
+    if end > cutoff_s:
+        return "pending", "Pendente"
+    if row.get("success"):
+        return "completed", "Completata"
+    if row.get("http_status") == 429:
+        return "rejected", "Rifiutata (429)"
+    return "error", "Errore"
+
+
+def _build_request_rows_html(arrivals: list[Any], rows: dict[int, dict[str, Any]], cutoff_s: float) -> list[str]:
+    """Costruisce le righe HTML di dettaglio per ogni singola richiesta reale."""
     req_rows_html = []
     for arrival in arrivals:
         row = rows[arrival.sequence]
-        end = row["sent_s"] + row["response_s"]
         resp = row.get("response") if isinstance(row.get("response"), dict) else {}
-        if end > cutoff_s:
-            status_key, status_label = "pending", "Pendente"
-        elif row.get("success"):
-            status_key, status_label = "completed", "Completata"
-        elif row.get("http_status") == 429:
-            status_key, status_label = "rejected", "Rifiutata (429)"
-        else:
-            status_key, status_label = "error", "Errore"
-
-        warm_val = resp.get("IsWarmStart")
-        start_badge = (
-            '<span class="pill pill-warm">Warm</span>'
-            if warm_val is True
-            else ('<span class="pill pill-cold">Cold</span>' if warm_val is False else '<span class="muted">-</span>')
-        )
+        status_key, status_label = _classify_request_status(row, cutoff_s)
+        start_badge = _format_start_badge(resp.get("IsWarmStart"))
         node = str(resp.get("ExecutionNode") or "-")
         area = str(resp.get("ExecutionArea") or "-")
         http_code = str(row.get("http_status") if row.get("http_status") is not None else row.get("error", "-"))
@@ -394,7 +400,48 @@ def render_html_report(
               <td><span class="pill pill-{status_key}">{status_label}</span></td>
             </tr>"""
         )
+    return req_rows_html
 
+
+def render_html_report(
+    *,
+    scenario_path: Path,
+    results_path: Path,
+    seed: int,
+    cutoff_s: float,
+    arrivals: list[Any],
+    rows: dict[int, dict[str, Any]],
+    simulated_outcomes: list[Any],
+    real_outcomes: list[Any],
+) -> str:
+    """Costruisce una pagina HTML autonoma con CSS e grafici SVG integrati."""
+    sim_total = compute_metrics(simulated_outcomes)
+    real_total = compute_metrics(real_outcomes)
+    fn_names = sorted({item.function for item in arrivals})
+    per_fn = {
+        name: (
+            compute_metrics([o for o in simulated_outcomes if o.function == name]),
+            compute_metrics([o for o in real_outcomes if o.function == name]),
+        )
+        for name in fn_names
+    }
+
+    node_counts = _collect_node_counts(rows)
+    real_final_ok = sum(1 for row in rows.values() if row.get("success"))
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    chart_outcomes = _svg_stacked_outcomes(sim_total, real_total)
+    chart_resp = _svg_grouped_bars([(n, per_fn[n][0].mean_response_s, per_fn[n][1].mean_response_s) for n in fn_names], "s")
+    chart_p95 = _svg_grouped_bars([(n, per_fn[n][0].p95_response_s, per_fn[n][1].p95_response_s) for n in fn_names], "s")
+    chart_cold = _svg_grouped_bars(
+        [(n, per_fn[n][0].cold_pct, per_fn[n][1].cold_pct) for n in fn_names], "%", max_override=100.0
+    )
+    chart_service = _svg_grouped_bars([(n, per_fn[n][0].mean_service_s, per_fn[n][1].mean_service_s) for n in fn_names], "s")
+    chart_nodes = _svg_node_distribution(node_counts)
+
+    fn_rows_html = _build_fn_rows_html(fn_names, per_fn)
+    placement_rows_html = _build_placement_rows_html(fn_names, simulated_outcomes, real_outcomes)
+    req_rows_html = _build_request_rows_html(arrivals, rows, cutoff_s)
     fn_filter_options = "".join(f'<option value="{escape(n)}">{escape(n)}</option>' for n in fn_names)
 
     return f"""<!DOCTYPE html>

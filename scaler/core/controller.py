@@ -39,7 +39,7 @@ class ZoneController:
         self._reward_calc = RewardCalculator(reward_config)
 
         # Inizializza il generatore di numeri casuali.
-        self._rng = np.random.default_rng() if rng is None else rng
+        self._rng = np.random.default_rng(0) if rng is None else rng
 
         # Inizializza l'ID della decisione.
         self._decision_id = 0

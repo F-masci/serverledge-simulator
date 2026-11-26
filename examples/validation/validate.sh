@@ -166,7 +166,7 @@ cmd_run() {
       -e|--env) CONDA_ENV_NAME="$2"; shift 2 ;;
       --env=*) CONDA_ENV_NAME="${1#*=}"; shift ;;
       -h|--help) usage; exit 0 ;;
-      *) echo "Opzione sconosciuta per 'run': $1" >&2; exit 2 ;;
+      *) local unknown_opt="$1"; echo "Opzione sconosciuta per 'run': $unknown_opt" >&2; exit 2 ;;
     esac
   done
 

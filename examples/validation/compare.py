@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import webbrowser
 from collections import Counter
 from dataclasses import dataclass
@@ -15,6 +16,15 @@ from simulator.utils.report import _percent, _seconds, _table
 
 from replay import sample_arrivals
 from report_html import render_html_report
+
+
+def _safe_cli_path(path: Path) -> Path:
+    """Risolve il percorso canonico e verifica che resti nella directory di lavoro corrente."""
+    resolved = os.path.realpath(path)
+    base_dir = os.path.realpath(os.getcwd())
+    if resolved != base_dir and not resolved.startswith(base_dir + os.sep):
+        raise ValueError(f"Percorso fuori dalla directory consentita: {path}")
+    return Path(resolved)
 
 
 @dataclass(frozen=True)
@@ -55,39 +65,30 @@ def summarize(outcomes: list[Outcome]) -> tuple[object, ...]:
     )
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("results", type=Path, help="File JSONL prodotto da validate.sh replay (o run)")
-    parser.add_argument("--scenario", type=Path,
-                        default=Path(__file__).resolve().parents[1] / "scenarios/validation.toml")
-    parser.add_argument("--html", type=Path, help="Salva un report grafico HTML autonomo al percorso indicato")
-    parser.add_argument("--open", action="store_true", help="Apri automaticamente il report HTML nel browser")
-    args = parser.parse_args()
+def _load_replay_rows(results_path: Path) -> dict[int, dict]:
+    """Carica e valida le righe JSONL prodotte dal replay reale."""
+    rows: dict[int, dict] = {}
+    for line in results_path.read_text(encoding="utf-8").splitlines():
+        row = json.loads(line)
+        sequence = row["sequence"]
+        if sequence in rows:
+            raise ValueError(f"Sequenza duplicata: {sequence}")
+        rows[sequence] = row
+    if not rows or set(rows) != set(range(1, len(rows) + 1)):
+        raise ValueError("Il file deve contenere un record per ogni richiesta, numerate da 1")
+    return rows
 
-    rows = {}
-    try:
-        for line in args.results.read_text().splitlines():
-            row = json.loads(line)
-            sequence = row["sequence"]
-            if sequence in rows:
-                raise ValueError(f"Sequenza duplicata: {sequence}")
-            rows[sequence] = row
-        if not rows or set(rows) != set(range(1, len(rows) + 1)):
-            raise ValueError("Il file deve contenere un record per ogni richiesta, numerate da 1")
-    except (OSError, ValueError, KeyError, TypeError) as error:
-        parser.error(str(error))
 
-    scenario = Scenario.load(args.scenario)
-    simulated = Counter()
-    simulated_outcomes = []
+def _simulate_outcomes(scenario: Scenario, total_requests: int) -> tuple[list, list[Outcome]]:
+    """Esegue la traccia sul simulatore e raccoglie gli esiti delle richieste."""
+    simulated: Counter[str] = Counter()
+    simulated_outcomes: list[Outcome] = []
 
     def record(event: Notification) -> None:
         if isinstance(event, RequestCompleted):
             node_name = event.node.id.key if event.node is not None else None
-            region_name = (
-                event.node.region.name if event.node is not None
-                else (event.region.name if getattr(event, "region", None) is not None else None)
-            )
+            fallback_region = event.region.name if getattr(event, "region", None) is not None else None
+            region_name = event.node.region.name if event.node is not None else fallback_region
             simulated_outcomes.append(Outcome(
                 event.function.name, "completed", event.response_time_s,
                 event.service_time_s, event.request.warm, node_name, region_name,
@@ -99,20 +100,25 @@ def main() -> None:
 
     unsubscribe = observer.subscribe(record)
     try:
-        arrivals = sample_arrivals(scenario, len(rows))
+        arrivals = sample_arrivals(scenario, total_requests)
     finally:
         unsubscribe()
 
-    if len(arrivals) != len(rows):
-        parser.error("Il numero di arrivi del simulatore differisce dal file reale")
-    cutoff = arrivals[-1].arrival_s
-    real_outcomes = []
+    functions = Counter(arrival.function for arrival in arrivals)
+    for name, count in (functions - simulated).items():
+        simulated_outcomes.extend(Outcome(name, "pending") for _ in range(count))
+    return arrivals, simulated_outcomes
+
+
+def _build_real_outcomes(arrivals: list, rows: dict[int, dict], cutoff: float) -> list[Outcome]:
+    """Converte i record del replay reale in `Outcome` coerenti con il cutoff temporale."""
+    real_outcomes: list[Outcome] = []
     for arrival in arrivals:
         row = rows[arrival.sequence]
         if (row.get("function"), row.get("arrival_s"), row.get("service_s")) != (
             arrival.function, arrival.arrival_s, arrival.service_s,
         ):
-            parser.error(f"La richiesta #{arrival.sequence} differisce dalla traccia. Verifica scenario e seed.")
+            raise ValueError(f"La richiesta #{arrival.sequence} differisce dalla traccia. Verifica scenario e seed.")
 
         end = row["sent_s"] + row["response_s"]
         if end > cutoff:
@@ -127,11 +133,17 @@ def main() -> None:
         else:
             status = "rejected" if row["http_status"] == 429 else "error"
             real_outcomes.append(Outcome(arrival.function, status))
+    return real_outcomes
 
-    functions = Counter(arrival.function for arrival in arrivals)
-    for name, count in (functions - simulated).items():
-        simulated_outcomes.extend(Outcome(name, "pending") for _ in range(count))
 
+def _print_comparison_tables(
+    cutoff: float,
+    functions: Counter[str],
+    simulated_outcomes: list[Outcome],
+    real_outcomes: list[Outcome],
+    rows: dict[int, dict],
+) -> None:
+    """Stampa le tabelle testuali di confronto tra simulatore e sistema reale."""
     headers = ("Sistema", "Arrivi", "Completate", "Rifiutate", "Pendenti", "Errori",
                "Cold %", "Risposta media", "p95", "Servizio medio")
     print(f"Confronto a t = {_seconds(cutoff)} dall'inizio della traccia")
@@ -159,10 +171,42 @@ def main() -> None:
     ))
     print(f'\nEsito finale del replay reale: {sum(row["success"] for row in rows.values())}/{len(rows)} riuscite.')
 
-    if args.html:
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("results", type=Path, help="File JSONL prodotto da validate.sh replay (o run)")
+    parser.add_argument("--scenario", type=Path,
+                        default=Path(__file__).resolve().parents[1] / "scenarios/validation.toml")
+    parser.add_argument("--html", type=Path, help="Salva un report grafico HTML autonomo al percorso indicato")
+    parser.add_argument("--open", action="store_true", help="Apri automaticamente il report HTML nel browser")
+    args = parser.parse_args()
+
+    try:
+        results_path = _safe_cli_path(args.results)
+        scenario_path = _safe_cli_path(args.scenario)
+        html_path = _safe_cli_path(args.html) if args.html else None
+        rows = _load_replay_rows(results_path)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        parser.error(str(error))
+
+    scenario = Scenario.load(scenario_path)
+    arrivals, simulated_outcomes = _simulate_outcomes(scenario, len(rows))
+    if len(arrivals) != len(rows):
+        parser.error("Il numero di arrivi del simulatore differisce dal file reale")
+
+    cutoff = arrivals[-1].arrival_s
+    try:
+        real_outcomes = _build_real_outcomes(arrivals, rows, cutoff)
+    except ValueError as error:
+        parser.error(str(error))
+
+    functions = Counter(arrival.function for arrival in arrivals)
+    _print_comparison_tables(cutoff, functions, simulated_outcomes, real_outcomes, rows)
+
+    if html_path is not None:
         html_content = render_html_report(
-            scenario_path=args.scenario.resolve(),
-            results_path=args.results.resolve(),
+            scenario_path=scenario_path,
+            results_path=results_path,
             seed=scenario.seed,
             cutoff_s=cutoff,
             arrivals=arrivals,
@@ -170,11 +214,11 @@ def main() -> None:
             simulated_outcomes=simulated_outcomes,
             real_outcomes=real_outcomes,
         )
-        args.html.parent.mkdir(parents=True, exist_ok=True)
-        args.html.write_text(html_content, encoding="utf-8")
-        print(f"Report HTML salvato in: {args.html.resolve()}")
+        html_path.parent.mkdir(parents=True, exist_ok=True)
+        html_path.write_text(html_content, encoding="utf-8")
+        print(f"Report HTML salvato in: {html_path}")
         if args.open:
-            webbrowser.open(args.html.resolve().as_uri())
+            webbrowser.open(html_path.as_uri())
 
 
 if __name__ == "__main__":

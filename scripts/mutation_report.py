@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 import re
 from pathlib import Path
 
@@ -14,6 +15,15 @@ from mutmut.__main__ import get_diff_for_mutant, status_by_exit_code
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _DIFF_REMOVE_RE = re.compile(r'^-(?!--)(.*)$')
 _DIFF_ADD_RE = re.compile(r'^\+(?!\+\+)(.*)$')
+
+
+def _safe_cli_path(path: Path) -> Path:
+    """Risolve il percorso canonico e verifica che resti nella directory di lavoro corrente."""
+    resolved = os.path.realpath(path)
+    base_dir = os.path.realpath(os.getcwd())
+    if resolved != base_dir and not resolved.startswith(base_dir + os.sep):
+        raise ValueError(f'Percorso fuori dalla directory consentita: {path}')
+    return Path(resolved)
 
 
 def _index_function_lines(source: str) -> dict[str, tuple[int, int]]:
@@ -115,6 +125,51 @@ def _format_markdown(report: dict) -> str:
     return '\n'.join(lines) + '\n'
 
 
+def _collect_file_stats(
+    meta_path: Path, mutants_dir: Path,
+) -> tuple[str, dict[str, int | float], list[dict]] | None:
+    """Analizza un singolo file `.py.meta` di mutmut e restituisce statistiche e mutanti sopravvissuti."""
+    rel_path = str(meta_path.relative_to(mutants_dir)).removesuffix('.meta')
+    source_path = REPO_ROOT / rel_path
+    if not source_path.is_file():
+        return None
+
+    data = json.loads(meta_path.read_text(encoding='utf-8'))
+    exit_codes: dict[str, int | None] = data.get('exit_code_by_key', {})
+    source_text = source_path.read_text(encoding='utf-8')
+    source_lines = source_text.splitlines()
+    func_ranges = _index_function_lines(source_text)
+
+    stats: dict[str, int | float] = {'checked': 0, 'killed': 0, 'survived': 0, 'timeout': 0, 'no_tests': 0, 'other': 0}
+    survivors: list[dict] = []
+    status_bucket = {'killed': 'killed', 'timeout': 'timeout', 'no tests': 'no_tests'}
+
+    for key, code in sorted(exit_codes.items()):
+        status = status_by_exit_code[code]
+        if status == 'not checked':
+            continue
+        stats['checked'] += 1
+        if status == 'survived':
+            stats['survived'] += 1
+            diff_text = get_diff_for_mutant(key, path=Path(rel_path))
+            lineno, summary = _resolve_line_and_summary(source_lines, func_ranges, key, diff_text)
+            survivors.append({
+                'mutant_id': key,
+                'file_path': rel_path,
+                'symbol': _extract_symbol_from_key(key),
+                'line': lineno,
+                'summary': summary,
+            })
+        else:
+            stats[status_bucket.get(status, 'other')] += 1
+
+    if stats['checked'] == 0:
+        return None
+    detected = stats['killed'] + stats['timeout']
+    stats['mutation_score_pct'] = round(100.0 * detected / stats['checked'], 2)
+    return rel_path, stats, survivors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description='Genera i report Markdown e JSON dai risultati di mutmut.')
     parser.add_argument('--mutants-dir', type=Path, default=REPO_ROOT / 'mutants')
@@ -123,56 +178,23 @@ def main() -> int:
     parser.add_argument('--min-score', type=float, default=0.0)
     args = parser.parse_args()
 
-    meta_files = sorted(args.mutants_dir.rglob('*.py.meta'))
+    mutants_dir = _safe_cli_path(args.mutants_dir)
+    json_out = _safe_cli_path(args.json_out)
+    md_out = _safe_cli_path(args.md_out)
+
     by_file: dict[str, dict[str, int | float]] = {}
     totals = {'checked': 0, 'killed': 0, 'survived': 0, 'timeout': 0, 'no_tests': 0, 'other': 0}
     survivors: list[dict] = []
 
-    for meta_path in meta_files:
-        rel_path = str(meta_path.relative_to(args.mutants_dir)).removesuffix('.meta')
-        source_path = REPO_ROOT / rel_path
-        if not source_path.is_file():
+    for meta_path in sorted(mutants_dir.rglob('*.py.meta')):
+        collected = _collect_file_stats(meta_path, mutants_dir)
+        if collected is None:
             continue
-
-        data = json.loads(meta_path.read_text(encoding='utf-8'))
-        exit_codes: dict[str, int | None] = data.get('exit_code_by_key', {})
-        source_text = source_path.read_text(encoding='utf-8')
-        source_lines = source_text.splitlines()
-        func_ranges = _index_function_lines(source_text)
-
-        stats = {'checked': 0, 'killed': 0, 'survived': 0, 'timeout': 0, 'no_tests': 0, 'other': 0}
-        for key, code in sorted(exit_codes.items()):
-            status = status_by_exit_code[code]
-            if status == 'not checked':
-                continue
-            stats['checked'] += 1
-            if status == 'killed':
-                stats['killed'] += 1
-            elif status == 'survived':
-                stats['survived'] += 1
-                diff_text = get_diff_for_mutant(key, path=Path(rel_path))
-                lineno, summary = _resolve_line_and_summary(source_lines, func_ranges, key, diff_text)
-                survivors.append({
-                    'mutant_id': key,
-                    'file_path': rel_path,
-                    'symbol': _extract_symbol_from_key(key),
-                    'line': lineno,
-                    'summary': summary,
-                })
-            elif status == 'timeout':
-                stats['timeout'] += 1
-            elif status == 'no tests':
-                stats['no_tests'] += 1
-            else:
-                stats['other'] += 1
-
-        if stats['checked'] == 0:
-            continue
-        for k in totals:
-            totals[k] += stats[k]
-        detected = stats['killed'] + stats['timeout']
-        file_score = round(100.0 * detected / stats['checked'], 2) if stats['checked'] else 100.0
-        by_file[rel_path] = {**stats, 'mutation_score_pct': file_score}
+        rel_path, stats, file_survivors = collected
+        by_file[rel_path] = stats
+        survivors.extend(file_survivors)
+        for key in totals:
+            totals[key] += int(stats[key])
 
     detected_total = totals['killed'] + totals['timeout']
     score = round(100.0 * detected_total / totals['checked'], 2) if totals['checked'] else 100.0
@@ -186,8 +208,8 @@ def main() -> int:
     }
     markdown = _format_markdown(report)
 
-    args.json_out.write_text(json.dumps(report, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
-    args.md_out.write_text(markdown, encoding='utf-8')
+    json_out.write_text(json.dumps(report, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+    md_out.write_text(markdown, encoding='utf-8')
 
     print(markdown)
     return 1 if score < args.min_score else 0

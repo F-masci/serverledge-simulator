@@ -163,7 +163,7 @@ class NodeMetricCache:
             self.reconcile(node, now=now)
 
         # Rimuove i nodi non più attivi dalla cache.
-        for stale_key in list(self._metrics.keys() - active_keys):
+        for stale_key in self._metrics.keys() - active_keys:
             del self._metrics[stale_key]
 
 

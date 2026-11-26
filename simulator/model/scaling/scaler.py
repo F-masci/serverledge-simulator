@@ -194,7 +194,7 @@ class Scaler:
         if node is not None:
             self._accounting.on_node_drain_completed(node.key, now)
 
-    def finalize(self, now: float, *, truncated: bool = True) -> None:
+    def finalize(self, now: float) -> None:
         """Chiude l'eventuale intervallo residuo al termine della replica."""
         if self._finalized:
             return

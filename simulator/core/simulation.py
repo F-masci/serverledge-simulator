@@ -195,7 +195,7 @@ class Simulation:
         for region in self.regions.values():
             scaler = region.scaler
             if scaler is not None:
-                scaler.finalize(self.now, truncated=True)
+                scaler.finalize(self.now)
 
         return self._final_statistics()
 
@@ -400,7 +400,7 @@ class Simulation:
         event = NodeProvisionedEvent(ctx=self._ctx, region=region, ring_id=ring_id, op_id=op.op_id)
         
         # Se il tempo di boot è nullo, esegue immediatamente l'evento nello stesso istante simulato.
-        if boot_time_s == 0.0:
+        if boot_time_s <= 0.0:
             event.execute()
         # Altrimenti pianifica l'evento dopo il tempo di boot specificato.
         else:
@@ -453,7 +453,7 @@ class Simulation:
         event = NodeDrainedEvent(ctx=self._ctx, region=region, ring_id=ring_id, op_id=op.op_id)
 
         # Se il tempo di spegnimento è nullo, esegue immediatamente l'evento nello stesso istante simulato.
-        if shutdown_time_s == 0.0:
+        if shutdown_time_s <= 0.0:
             event.execute()
         # Altrimenti pianifica l'evento dopo il tempo di spegnimento specificato.
         else:

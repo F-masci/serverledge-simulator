@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
@@ -17,6 +18,15 @@ from urllib.request import Request, urlopen
 from simulator.core.simulation import Simulation
 from simulator.io.scenario import Scenario
 from simulator.observer import Notification, RequestArrived, observer
+
+
+def _safe_cli_path(path: Path) -> Path:
+    """Risolve il percorso canonico e verifica che resti nella directory di lavoro corrente."""
+    resolved = os.path.realpath(path)
+    base_dir = os.path.realpath(os.getcwd())
+    if resolved != base_dir and not resolved.startswith(base_dir + os.sep):
+        raise ValueError(f"Percorso fuori dalla directory consentita: {path}")
+    return Path(resolved)
 
 
 @dataclass(frozen=True)
@@ -120,14 +130,21 @@ def main() -> None:
     if args.arrivals < 1 or args.concurrency < 1 or args.timeout <= 0:
         parser.error("--arrivals, --concurrency e --timeout devono essere positivi")
 
-    scenario = Scenario.load(args.scenario)
+    try:
+        scenario_path = _safe_cli_path(args.scenario)
+        output_path = _safe_cli_path(args.output) if args.output else None
+    except ValueError as error:
+        parser.error(str(error))
+
+    scenario = Scenario.load(scenario_path)
     if not args.dry_run and (scenario.invocation.entry_node is not None
                              or scenario.invocation.entry_region not in (None, scenario.primary_region)):
         parser.error("Il replay HTTP usa il bilanciatore della regione primaria. Usa --dry-run per altri ingressi.")
 
     arrivals = sample_arrivals(scenario, args.arrivals)
+    default_stream = sys.stdout if args.dry_run else None
     try:
-        output = args.output.open("x") if args.output else nullcontext(sys.stdout if args.dry_run else None)
+        output = output_path.open("x") if output_path else nullcontext(default_stream)
     except OSError as error:
         parser.error(str(error))
     with output as stream:

@@ -47,15 +47,17 @@ class _NodeConfig:
                 raise ValueError('node.fallback_local deve essere un booleano')
             fallback = data['fallback_local']
 
-        neighbors: tuple[str, ...] | None = None
-        if 'nearest_neighbors' in data:
-            raw_neighbors = data['nearest_neighbors']
-            if not isinstance(raw_neighbors, list):
-                raise ValueError('node.nearest_neighbors deve essere una lista di nomi')
-            neighbors = tuple(nonempty_string(item, 'node.nearest_neighbors') for item in raw_neighbors)
-            if len(neighbors) != len(set(neighbors)):
-                raise ValueError('node.nearest_neighbors contiene nomi duplicati')
-            if len(neighbors) > 2 or name in neighbors:
-                raise ValueError('node.nearest_neighbors ammette fino a due altri nodi della stessa regione')
-
+        neighbors = cls._parse_neighbors(data['nearest_neighbors'], name) if 'nearest_neighbors' in data else None
         return cls(name, tag, policy, fallback, neighbors, region)
+
+    @staticmethod
+    def _parse_neighbors(raw_neighbors: object, node_name: str) -> tuple[str, ...]:
+        """Valida l'elenco di al più due vicini edge distinti della stessa regione."""
+        if not isinstance(raw_neighbors, list):
+            raise ValueError('node.nearest_neighbors deve essere una lista di nomi')
+        neighbors = tuple(nonempty_string(item, 'node.nearest_neighbors') for item in raw_neighbors)
+        if len(neighbors) != len(set(neighbors)):
+            raise ValueError('node.nearest_neighbors contiene nomi duplicati')
+        if len(neighbors) > 2 or node_name in neighbors:
+            raise ValueError('node.nearest_neighbors ammette fino a due altri nodi della stessa regione')
+        return neighbors

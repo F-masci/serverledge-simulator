@@ -1,9 +1,19 @@
 """Punto di ingresso CLI per l'addestramento dello scaler PPO con Ray RLlib."""
 
 import argparse
+import os
 from pathlib import Path
 
 from .ppo import train_rllib_ppo
+
+
+def _resolve_cli_path(path: Path) -> Path:
+    """Risolve il percorso canonico e verifica che resti nella directory di lavoro corrente."""
+    resolved = os.path.realpath(path)
+    base_dir = os.path.realpath(os.getcwd())
+    if resolved != base_dir and not resolved.startswith(base_dir + os.sep):
+        raise ValueError(f'Percorso fuori dalla directory consentita: {path}')
+    return Path(resolved)
 
 
 def main() -> None:
@@ -22,8 +32,11 @@ def main() -> None:
     parser.add_argument('--seed', type=int, default=None, help='Seed opzionale (default: seed dello scenario)')
     args = parser.parse_args()
 
+    scenario_path = _resolve_cli_path(args.scenario)
+    checkpoint_dir = _resolve_cli_path(args.checkpoint) if args.checkpoint is not None else None
+
     result = train_rllib_ppo(
-        args.scenario,
+        scenario_path,
         num_iterations=args.iterations,
         region=args.region,
         max_arrivals=args.max_arrivals,
@@ -31,7 +44,7 @@ def main() -> None:
         max_steps=args.max_steps,
         num_env_runners=args.workers,
         num_gpus_per_learner=args.gpus,
-        checkpoint_dir=args.checkpoint,
+        checkpoint_dir=checkpoint_dir,
         seed=args.seed,
     )
     for row in result['history']:

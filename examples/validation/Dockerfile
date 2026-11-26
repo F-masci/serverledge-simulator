@@ -8,5 +8,7 @@ RUN make serverledge serverledge-cli lb
 FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --no-create-home --shell /usr/sbin/nologin serverledge
 COPY --from=build /src/bin/serverledge /src/bin/serverledge-cli /src/bin/lb /usr/local/bin/
+USER serverledge

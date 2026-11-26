@@ -148,22 +148,8 @@ class Region:
 
     ## Infra management ##
 
-    def _build_infrastructure(
-        self,
-        scenario: 'Scenario',
-        *,
-        node_bindings: 'NodeBindings | None' = None,
-    ) -> Infrastructure:
-        """Costruisce load balancer, anelli e nodi della regione a partire dallo scenario."""
-        region_config = scenario.regions[self._name]
-        config = region_config.infrastructure
-        assert config is not None
-
-        # Crea il load balancer con uno stream PRNG dedicato alla regione.
-        # La modalità e il numero di repliche possono essere definiti sulla singola regione
-        # o ereditati dallo scenario (default 128; se non specificati, ArchitectureUnaware
-        # eredita le repliche dei soli anelli non vuoti se uniformi).
-        streams = RandomStreams(scenario.seed)
+    def _build_load_balancer(self, region_config, config, scenario: 'Scenario') -> tuple[LoadBalancer, int]:
+        """Costruisce il load balancer regionale e restituisce anche le repliche di default dei ring."""
         stream_id = 'load_balancer' if self._name == scenario.primary_region else f'load_balancer/{self._name}'
         lb_mode = region_config.load_balancer or scenario.load_balancer
         explicit_replicas = (
@@ -194,6 +180,22 @@ class Region:
             resource_cache=lb_resource_cache,
             refresh_interval_s=lb_refresh_interval_s,
         )
+        default_ring_replicas = explicit_replicas if explicit_replicas is not None else 128
+        return load_balancer, default_ring_replicas
+
+    def _build_infrastructure(
+        self,
+        scenario: 'Scenario',
+        *,
+        node_bindings: 'NodeBindings | None' = None,
+    ) -> Infrastructure:
+        """Costruisce load balancer, anelli e nodi della regione a partire dallo scenario."""
+        region_config = scenario.regions[self._name]
+        config = region_config.infrastructure
+        assert config is not None
+
+        streams = RandomStreams(scenario.seed)
+        load_balancer, default_ring_replicas = self._build_load_balancer(region_config, config, scenario)
         infrastructure = Infrastructure(
             load_balancer,
             region=self,
@@ -201,8 +203,6 @@ class Region:
         )
 
         # Popola gli anelli e i rispettivi nodi con i parametri dello scenario.
-        # Un ring senza replicas esplicite eredita load_balancer_replicas (come lb.replicas in Go).
-        default_ring_replicas = explicit_replicas if explicit_replicas is not None else 128
         for ring in config.rings:
             self._create_ring(
                 infrastructure, ring.id,

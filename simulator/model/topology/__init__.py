@@ -12,14 +12,16 @@ __all__ = [
     'Resources',
 ]
 
+_NODE_MODULE = '.node'
+
 _EXPORTS = {
     'ArchitectureRing': ('.ring', 'ArchitectureRing'),
     'Infrastructure': ('.infrastructure', 'Infrastructure'),
-    'Node': ('.node', 'Node'),
-    'NodeID': ('.node', 'NodeID'),
+    'Node': (_NODE_MODULE, 'Node'),
+    'NodeID': (_NODE_MODULE, 'NodeID'),
     'Region': ('.region', 'Region'),
     'RegionMode': ('.region', 'RegionMode'),
-    'Resources': ('.node', 'Resources'),
+    'Resources': (_NODE_MODULE, 'Resources'),
 }
 
 
