@@ -176,8 +176,23 @@ class Region:
         else:
             active_replicas = {ring.replicas or 128 for ring in config.rings if ring.nodes}
             lb_replicas = next(iter(active_replicas)) if len(active_replicas) == 1 else 128
+        lb_resource_cache = (
+            region_config.load_balancer_resource_cache
+            if region_config.load_balancer_resource_cache is not None
+            else scenario.load_balancer_resource_cache
+        )
+        lb_refresh_interval_s = (
+            region_config.load_balancer_refresh_interval_s
+            if region_config.load_balancer_refresh_interval_s is not None
+            else scenario.load_balancer_refresh_interval_s
+        )
         load_balancer = LoadBalancer.create(
-            lb_mode, seed=scenario.seed, stream_id=stream_id, replicas=lb_replicas,
+            lb_mode,
+            seed=scenario.seed,
+            stream_id=stream_id,
+            replicas=lb_replicas,
+            resource_cache=lb_resource_cache,
+            refresh_interval_s=lb_refresh_interval_s,
         )
         infrastructure = Infrastructure(
             load_balancer,

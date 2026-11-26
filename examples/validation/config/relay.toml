@@ -1,0 +1,21 @@
+api.ip = "127.0.0.1"
+api.port = 13305
+registry.udp.port = 19875
+registry.area = "SIM_EDGE"
+registry.node.id = "relay"
+node.architecture = "arm64"
+node.machine_tag = "regional-arm"
+
+scheduler.policy = "cloudonly"
+registry.remote.area = "SIM_REGIONAL"
+scheduler.queue.capacity = 2
+container.pool.memory = 512
+container.pool.cpus = 1.0
+container.expiration = 2
+janitor.interval = 1
+
+registry.monitoring.interval = 2
+registry.nearby.interval = 2
+metrics.enabled = false
+profiling.enabled = false
+factory.images.refresh = false

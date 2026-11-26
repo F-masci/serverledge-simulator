@@ -28,7 +28,7 @@ from types import MappingProxyType
 
 from simulator.model.scheduling.load_balancer import LoadBalancerMode
 from simulator.model.topology.region import RegionMode
-from simulator.utils.validation import nonempty_string, nonnegative_number, positive_integer
+from simulator.utils.validation import nonempty_string, nonnegative_number, positive_integer, positive_number
 
 from .infrastructure import _InfrastructureConfig
 from ..scaler import ScalerConfig
@@ -45,6 +45,8 @@ class _RegionConfig:
     has_load_balancer: bool = True
     load_balancer: LoadBalancerMode | None = None
     load_balancer_replicas: int | None = None
+    load_balancer_resource_cache: bool | None = None
+    load_balancer_refresh_interval_s: float | None = None
     scaler: ScalerConfig | None = None
 
     @classmethod
@@ -53,7 +55,8 @@ class _RegionConfig:
         prefix = f'regions.{name}'
         allowed = {
             'mode', 'infrastructure', 'service_time_s', 'offload_latency_s', 'offload_latency_by_source_s',
-            'has_load_balancer', 'load_balancer', 'load_balancer_replicas', 'scaler',
+            'has_load_balancer', 'load_balancer', 'load_balancer_replicas',
+            'load_balancer_resource_cache', 'load_balancer_refresh_interval_s', 'scaler',
         }
         if not isinstance(data, Mapping) or data.keys() - allowed:
             raise ValueError(f'Configurazione non valida per {prefix}')
@@ -71,6 +74,8 @@ class _RegionConfig:
         mode = data.get('mode', RegionMode.SIMULATED)
         load_balancer: LoadBalancerMode | None = None
         load_balancer_replicas: int | None = None
+        load_balancer_resource_cache: bool | None = None
+        load_balancer_refresh_interval_s: float | None = None
         scaler: ScalerConfig | None = None
         if mode == RegionMode.SIMULATED:
             if 'service_time_s' in data:
@@ -91,10 +96,22 @@ class _RegionConfig:
                 load_balancer_replicas = positive_integer(
                     data['load_balancer_replicas'], f'{prefix}.load_balancer_replicas',
                 )
+            if 'load_balancer_resource_cache' in data:
+                cache_flag = data['load_balancer_resource_cache']
+                if not isinstance(cache_flag, bool):
+                    raise ValueError(f'{prefix}.load_balancer_resource_cache deve essere un booleano')
+                load_balancer_resource_cache = cache_flag
+            if 'load_balancer_refresh_interval_s' in data:
+                load_balancer_refresh_interval_s = positive_number(
+                    data['load_balancer_refresh_interval_s'], f'{prefix}.load_balancer_refresh_interval_s',
+                )
             if 'scaler' in data:
                 scaler = ScalerConfig.parse(data['scaler'], prefix=f'{prefix}.scaler')
         elif mode == RegionMode.ALWAYS_SUCCEEDS:
-            for field_name in ('infrastructure', 'has_load_balancer', 'load_balancer', 'load_balancer_replicas', 'scaler'):
+            for field_name in (
+                'infrastructure', 'has_load_balancer', 'load_balancer', 'load_balancer_replicas',
+                'load_balancer_resource_cache', 'load_balancer_refresh_interval_s', 'scaler',
+            ):
                 if field_name in data:
                     raise ValueError(f'{prefix}.{field_name} richiede mode = "{RegionMode.SIMULATED.value}"')
             infrastructure = None
@@ -111,6 +128,8 @@ class _RegionConfig:
             has_load_balancer=has_load_balancer,
             load_balancer=load_balancer,
             load_balancer_replicas=load_balancer_replicas,
+            load_balancer_resource_cache=load_balancer_resource_cache,
+            load_balancer_refresh_interval_s=load_balancer_refresh_interval_s,
             scaler=scaler,
         )
 
@@ -123,6 +142,8 @@ class _RegionConfig:
             'has_load_balancer': self.has_load_balancer,
             'load_balancer': self.load_balancer,
             'load_balancer_replicas': self.load_balancer_replicas,
+            'load_balancer_resource_cache': self.load_balancer_resource_cache,
+            'load_balancer_refresh_interval_s': self.load_balancer_refresh_interval_s,
             'scaler': self.scaler,
         }
 

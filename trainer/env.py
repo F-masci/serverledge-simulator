@@ -234,6 +234,8 @@ class ServerledgeScalingEnv(gym.Env):
         object.__setattr__(new_scenario, 'seed', seed)
         object.__setattr__(new_scenario, 'load_balancer', base.load_balancer)
         object.__setattr__(new_scenario, 'load_balancer_replicas', base.load_balancer_replicas)
+        object.__setattr__(new_scenario, 'load_balancer_resource_cache', base.load_balancer_resource_cache)
+        object.__setattr__(new_scenario, 'load_balancer_refresh_interval_s', base.load_balancer_refresh_interval_s)
         object.__setattr__(new_scenario, 'scaler', base.scaler)
         object.__setattr__(new_scenario, 'scheduler', base.scheduler)
         object.__setattr__(new_scenario, 'containers', base.containers)

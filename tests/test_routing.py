@@ -79,10 +79,12 @@ class RoutingTest(unittest.TestCase):
         fallback_order = [ring_id for ring_id in nodes if ring_id not in (order[0].id, 'plain')]
         self.assertEqual([ring.id for ring in order[1:]], fallback_order)
         self.assertTrue(primary.submit(Request(fun)))
+        infra.refresh_load_balancer_metrics()
 
         self.assertIs(infra.submit(requests[0]), fallback)
         self.assertIs(requests[0].status, RequestStatus.ACCEPTED)
         self.assertTrue(last.submit(Request(fun)))
+        infra.refresh_load_balancer_metrics()
 
         rejected = requests[1]
         self.assertIsNone(infra.submit(rejected))
@@ -302,6 +304,82 @@ class RoutingTest(unittest.TestCase):
         replacement = infra.create_node('r', 'one')
         self.assertIsNot(replacement, primary)
         self.assertIs(infra.submit(Request(function())), replacement)
+
+    def test_resource_cache_pessimistic_decrement_and_reconciliation_match_go_proxy(self):
+        # Con resource_cache=True (default), il LB decrementa la propria cache a ogni invio
+        # e la riconcilia solo su reconcile_request (ModifyResponse) o refresh_metrics (/status).
+        lb = RandomLoadBalancer(seed=1, resource_cache=True, refresh_interval_s=2.0)
+        infra = Infrastructure(lb)
+        infra.create_ring('r', arch='amd64', memory=256, cpus=1.0)
+        node = infra.create_node('r', 'n1')
+        fun = Function('f', 128, 1.0, BuiltinRuntime('python314'))
+
+        first = Request(fun)
+        self.assertIs(infra.submit(first, now=1.0), node)
+        node.creation_succeeded(first.container, 1.0)
+        metric = lb.metric_cache.get(node)
+        self.assertIsNotNone(metric)
+        self.assertEqual((metric.free_memory_mb, metric.free_cpus), (128, 0.0))
+
+        # Completa first sul worker: il nodo torna subito libero (1.0 CPU, 256 MB reclamabili),
+        # ma finché non torna la risposta al proxy (ModifyResponse) la cache LB resta stale a 0.0 CPU
+        # e rifiuta il nuovo arrivo con out_of_resources.
+        node.complete(first.container, 1.5)
+        self.assertEqual(lb.metric_cache.get(node).free_cpus, 0.0)
+        blocked = Request(fun)
+        self.assertIsNone(infra.submit(blocked, now=1.5))
+        self.assertEqual(blocked.rejection_reason, 'out_of_resources')
+
+        # Al ritorno della risposta (reconcile_load_balancer), la cache viene riconciliata
+        # allo stato reale del nodo e il proxy torna ad accettare richieste.
+        infra.reconcile_load_balancer(first, now=1.5)
+        metric = lb.metric_cache.get(node)
+        self.assertEqual((metric.free_memory_mb, metric.free_cpus), (256, 1.0))
+        second = Request(fun)
+        self.assertIs(infra.submit(second, now=1.6), node)
+        self.assertTrue(second.warm)
+
+        # Con resource_cache=False (modalità ideale precedente), il controllo legge subito
+        # lo stato istantaneo del nodo e accetta senza attendere riconciliazione.
+        lb_ideal = RandomLoadBalancer(seed=1, resource_cache=False)
+        infra_ideal = Infrastructure(lb_ideal)
+        infra_ideal.create_ring('r', arch='amd64', memory=256, cpus=1.0)
+        node_ideal = infra_ideal.create_node('r', 'n1')
+        r1 = Request(fun)
+        self.assertIs(infra_ideal.submit(r1, now=1.0), node_ideal)
+        node_ideal.creation_succeeded(r1.container, 1.0)
+        node_ideal.complete(r1.container, 1.5)
+        r2 = Request(fun)
+        self.assertIs(infra_ideal.submit(r2, now=1.5), node_ideal)
+
+    def test_scenario_config_defaults_to_real_resource_cache_and_allows_opt_out(self):
+        from simulator.core.simulation import Simulation
+        from simulator.io.scenario import Scenario
+        from simulator.model.execution.function import FunctionProfile
+
+        fn = Function(
+            'hello', 128, 1.0, BuiltinRuntime('python314'),
+            profile=FunctionProfile(arrival_rate=1.0, service_rate=2.0, first_arrival_time=0.0),
+        )
+        infra_cfg = {'rings': [{'id': 'r', 'arch': 'amd64', 'memory_mb': 256, 'cpus': 2.0, 'nodes': [{'name': 'n1'}]}]}
+
+        default_scenario = Scenario((fn,), infrastructure=infra_cfg)
+        self.assertTrue(default_scenario.load_balancer_resource_cache)
+        self.assertEqual(default_scenario.load_balancer_refresh_interval_s, 30.0)
+        sim_default = Simulation(default_scenario)
+        lb_default = sim_default.regions['default'].infrastructure.load_balancer
+        self.assertTrue(lb_default.resource_cache_enabled)
+
+        ideal_scenario = Scenario(
+            (fn,), infrastructure=infra_cfg,
+            load_balancer_resource_cache=False, load_balancer_refresh_interval_s=5.0,
+        )
+        self.assertFalse(ideal_scenario.load_balancer_resource_cache)
+        self.assertEqual(ideal_scenario.load_balancer_refresh_interval_s, 5.0)
+        sim_ideal = Simulation(ideal_scenario)
+        lb_ideal = sim_ideal.regions['default'].infrastructure.load_balancer
+        self.assertFalse(lb_ideal.resource_cache_enabled)
+        self.assertEqual(lb_ideal.refresh_interval_s, 5.0)
 
 
 if __name__ == '__main__':

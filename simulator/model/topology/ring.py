@@ -204,14 +204,26 @@ class ArchitectureRing:
 
     ## Request management ##
 
-    def submit(self, request: Request, *, now: float = 0.0) -> Node | None:
+    def select_eligible_node(
+        self,
+        function: Function,
+        *,
+        is_eligible: Callable[[Node], bool] | None = None,
+    ) -> Node | None:
+        """Seleziona il primo candidato dell'hash ring che soddisfa il criterio di ammissione."""
+        predicate = (lambda candidate: candidate.can_allocate(function)) if is_eligible is None else is_eligible
+        return next((candidate for candidate in self._candidates(function) if predicate(candidate)), None)
+
+    def submit(
+        self,
+        request: Request,
+        *,
+        now: float = 0.0,
+        is_eligible: Callable[[Node], bool] | None = None,
+    ) -> Node | None:
         """Seleziona un nodo idoneo con l'hash e gli consegna l'invocazione."""
         request.ensure_created()
-        function = request.function
-
-        # TODO: modellare NodeMetricCache del proxy (polling periodico /status,
-        # decremento ottimistico in Next() e riconciliazione tramite header di risposta).
-        node = next((c for c in self._candidates(function) if c.can_allocate(function)), None)
+        node = self.select_eligible_node(request.function, is_eligible=is_eligible)
         if node is None:
             return None
 

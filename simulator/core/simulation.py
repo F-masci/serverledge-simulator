@@ -13,7 +13,8 @@ from simulator.io.scenario import Scenario
 from simulator.metrics import SimulationMetrics
 from simulator.model.events import (
     ArrivalEvent, CompletionEvent, ContainerCleanupEvent, ContainerReadyEvent,
-    NodeDrainedEvent, NodeProvisionedEvent, RegionDeliveryEvent, ResponseEvent, ScheduledEvent,
+    LoadBalancerRefreshEvent, NodeDrainedEvent, NodeProvisionedEvent, RegionDeliveryEvent,
+    ResponseEvent, ScheduledEvent,
 )
 from simulator.model.execution.container import DockerContainer
 from simulator.model.execution.request import Request, RequestStatus
@@ -195,6 +196,23 @@ class Simulation:
                 if scaler is not None:
                     scaler.attach(self._ctx)
 
+        # Pianifica il polling periodico /status dei load balancer con cache risorse attiva.
+        for region in self.regions.values():
+
+            # Se la regione non ha infrastruttura o non ha un load balancer, salta la pianificazione del refresh.
+            infra = region.infrastructure
+            if infra is None or not region.has_load_balancer:
+                continue
+
+            # Se il load balancer della regione non ha la cache risorse attiva, non pianifica il refresh.
+            lb = infra.load_balancer
+            if not lb.resource_cache_enabled:
+                continue
+
+            # Pianifica un evento di refresh del load balancer dopo l'intervallo specificato.
+            refresh_event = LoadBalancerRefreshEvent(ctx=self._ctx, region=region, interval_s=lb.refresh_interval_s)
+            self._ctx.engine.schedule_after(lb.refresh_interval_s, refresh_event)
+
         # Pianifica il primo arrivo per ogni funzione registrata nello scenario.
         request_bindings = self._build_request_bindings()
         first_arrivals = []
@@ -274,13 +292,25 @@ class Simulation:
     def _request_state_changed(
         self, request: Request, previous: RequestStatus, current: RequestStatus,
     ) -> None:
-        """Gestisce accettazione e ritorno dei rifiuti remoti della richiesta."""
+        """Gestisce accettazione, ritorno dei rifiuti remoti e riconciliazione cache LB."""
+
+        # Al completamento o rifiuto definitivo della richiesta, riconcilia la NodeMetricCache
+        # del load balancer della regione di ingresso.
+        if current in (RequestStatus.COMPLETED, RequestStatus.REJECTED):
+            for region in self.regions.values():
+                infra = region.infrastructure
+                if infra is not None:
+                    infra.reconcile_load_balancer(request, now=self.now)
+            return
+
+        # Se la richiesta è in stato di risposta e il precedente è stato creato,
+        # notifica il ritorno del rifiuto e pianifica un evento di risposta.
         if current is RequestStatus.RESPONDING and previous is RequestStatus.CREATED:
             self._ctx.observer.notify_request_rejection_returning(request)
-            self._ctx.engine.schedule_after(
-                request.return_delay, ResponseEvent(ctx=self._ctx, request=request),
-            )
+            self._ctx.engine.schedule_after(request.return_delay, ResponseEvent(ctx=self._ctx, request=request))
             return
+
+        # Se la richiesta è stata accettata, notifica l'accettazione e pianifica l'esecuzione.
         if current is not RequestStatus.ACCEPTED:
             return
 

@@ -1,0 +1,20 @@
+api.ip = "127.0.0.1"
+api.port = 13308
+registry.udp.port = 19878
+registry.area = "SIM_CLOUD"
+registry.node.id = "cloud-worker"
+node.architecture = "arm64"
+node.machine_tag = "arm64/archive-arm/cloud-arm"
+
+scheduler.policy = "default"
+scheduler.queue.capacity = 2
+container.pool.memory = 512
+container.pool.cpus = 1.0
+container.expiration = 2
+janitor.interval = 1
+
+registry.monitoring.interval = 2
+registry.nearby.interval = 2
+metrics.enabled = false
+profiling.enabled = false
+factory.images.refresh = false

@@ -1,0 +1,7 @@
+api.ip = "127.0.0.1"
+api.port = 13231
+registry.area = "SIM_EDGE"
+lb.mode = "Random"
+lb.arch_awareness = true
+lb.refresh_interval = 2
+metrics.enabled = false

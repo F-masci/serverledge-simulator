@@ -50,6 +50,11 @@ class Infrastructure:
         """Vista non modificabile dell'associazione ID → anello."""
         return MappingProxyType(self._rings)
 
+    @property
+    def load_balancer(self) -> LoadBalancer:
+        """Restituisce il load balancer configurato sull'infrastruttura."""
+        return self._load_balancer
+
     def get_ring(self, ring_id: str) -> ArchitectureRing | None:
         """Restituisce l'anello identificato dall'ID, o None se non esiste."""
         return self._rings.get(ring_id)
@@ -97,12 +102,12 @@ class Infrastructure:
         if any(existing.key == name for existing in self._nodes()):
             raise ValueError(f"Nodo già presente nell'infrastruttura: {name}")
 
-        # L'anello registra il nodo e notifica il load balancer prima delle callback esterne.
+        # L'anello registra il nodo e aggiorna il load balancer prima delle callback esterne.
         node = ring.create_node(
             name, machine_tag,
             idle_timeout=idle_timeout, queue_capacity=queue_capacity, eviction_rng=eviction_rng,
         )
-        self._load_balancer.on_node_added(ring)
+        self._load_balancer.register_node(ring, node)
         if self.on_node_created is not None:
             self.on_node_created(self, ring, node)
         return node
@@ -115,9 +120,18 @@ class Infrastructure:
 
         # L'anello aggiorna il routing prima della notifica.
         node = ring.remove_node(name)
+        self._load_balancer.unregister_node(node)
         if self.on_node_removed is not None:
             self.on_node_removed(self, ring, node)
         return node
+
+    def reconcile_load_balancer(self, request: Request, *, now: float = 0.0) -> None:
+        """Riconcilia la cache risorse del load balancer al completamento della richiesta."""
+        self._load_balancer.reconcile_request(request, now=now)
+
+    def refresh_load_balancer_metrics(self, *, now: float = 0.0) -> None:
+        """Riallinea la cache risorse del load balancer con i nodi attivi della regione."""
+        self._load_balancer.refresh_metrics(self._nodes(), now=now)
 
     def resolve_node(self, name: str) -> Node:
         matches = [node for node in self._nodes() if node.id.key == name]

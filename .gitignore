@@ -22,3 +22,6 @@ environment.yml
 
 # Addestramento
 checkpoints/
+
+# Output validazione locale
+examples/validation/results/

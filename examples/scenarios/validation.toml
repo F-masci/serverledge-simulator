@@ -1,0 +1,209 @@
+# Scenario di validazione allineato 1:1 al lab locale Serverledge (examples/validation/).
+# Tutte le regioni (edge, regional, cloud) sono simulate con i rispettivi worker reali
+# e latenza di rete locale (0 s su 127.0.0.1). Eseguire con almeno 100 arrivi.
+seed = 12345
+primary_region = "edge"
+load_balancer = "Random"
+load_balancer_resource_cache = true
+load_balancer_refresh_interval_s = 2.0
+
+[invocation]
+can_offload = true
+
+[scheduler.queue]
+capacity = 2
+
+[containers]
+idle_timeout = 2.0
+cleanup_interval = 1.0
+
+[containers.startup_times]
+"grussorusso/serverledge-python314" = 0.55
+
+[[functions]]
+name = "hello"
+first_arrival_time = 1.0
+code_load_time = 0.03
+runtime = "python314"
+memory_mb = 128
+cpu_demand = 1.0
+max_concurrency = 1
+supported_archs = ["amd64", "arm64"]
+tag_pattern = "amd64*"
+arrival_rate = 2.0
+service_rate = 4.0
+
+[[functions]]
+name = "resize"
+first_arrival_time = 1.5
+code_load_time = 0.42
+runtime = "python314"
+memory_mb = 256
+cpu_demand = 0.5
+max_concurrency = 2
+supported_archs = ["amd64"]
+tag_pattern = "amd64*"
+arrival_rate = 1.0
+service_rate = 2.0
+
+[[functions]]
+name = "telemetry"
+runtime = "python314"
+supported_archs = ["arm64"]
+tag_pattern = "gateway-arm"
+memory_mb = 128
+cpu_demand = 1.0
+first_arrival_time = 2.0
+arrival_rate = 2.0
+service_rate = 2.0
+arrival_distribution = "deterministic"
+service_distribution = "deterministic"
+
+[[functions]]
+name = "archive"
+runtime = "python314"
+supported_archs = ["arm64"]
+tag_pattern = "archive-arm"
+memory_mb = 128
+cpu_demand = 1.0
+first_arrival_time = 2.25
+arrival_rate = 0.5
+service_rate = 2.5
+arrival_distribution = "deterministic"
+service_distribution = "deterministic"
+
+[[functions]]
+name = "burst"
+runtime = "python314"
+supported_archs = ["arm64"]
+tag_pattern = "forward-arm"
+memory_mb = 128
+cpu_demand = 1.0
+first_arrival_time = 2.5
+arrival_rate = 4.0
+service_rate = 2.0
+arrival_distribution = "deterministic"
+service_distribution = "deterministic"
+
+[[functions]]
+name = "index"
+runtime = "python314"
+supported_archs = ["arm64"]
+tag_pattern = "regional-arm"
+memory_mb = 128
+cpu_demand = 1.0
+first_arrival_time = 3.0
+arrival_rate = 0.5
+service_rate = 4.0
+arrival_distribution = "deterministic"
+service_distribution = "deterministic"
+
+# --- Regione primaria: edge (SIM_EDGE) ---
+
+[[regions.edge.infrastructure.rings]]
+id = "edge-x86"
+arch = "amd64"
+memory_mb = 512
+cpus = 2.0
+
+[[regions.edge.infrastructure.rings.nodes]]
+name = "edge-1"
+
+[[regions.edge.infrastructure.rings]]
+id = "edge-x86-standard"
+arch = "amd64"
+machine_tag = "amd64/standard"
+memory_mb = 512
+cpus = 2.0
+
+[[regions.edge.infrastructure.rings.nodes]]
+name = "edge-2"
+
+[[regions.edge.infrastructure.rings]]
+id = "edge-arm-gateway"
+arch = "arm64"
+machine_tag = "gateway-arm"
+memory_mb = 512
+cpus = 1.0
+
+[[regions.edge.infrastructure.rings.nodes]]
+name = "gateway"
+policy = "edgecloud"
+remote_region = "regional"
+
+[[regions.edge.infrastructure.rings]]
+id = "edge-arm-archive"
+arch = "arm64"
+machine_tag = "archive-arm"
+memory_mb = 512
+cpus = 1.0
+
+[[regions.edge.infrastructure.rings.nodes]]
+name = "archive"
+policy = "cloudonly"
+remote_region = "cloud"
+
+[[regions.edge.infrastructure.rings]]
+id = "edge-arm-forwarder"
+arch = "arm64"
+machine_tag = "forward-arm"
+memory_mb = 512
+cpus = 1.0
+
+[[regions.edge.infrastructure.rings.nodes]]
+name = "forwarder"
+policy = "edgeonly"
+nearest_neighbors = ["edge-worker"]
+
+[[regions.edge.infrastructure.rings]]
+id = "edge-arm-relay"
+arch = "arm64"
+machine_tag = "regional-arm"
+memory_mb = 512
+cpus = 1.0
+
+[[regions.edge.infrastructure.rings.nodes]]
+name = "relay"
+policy = "cloudonly"
+remote_region = "regional"
+
+[[regions.edge.infrastructure.rings]]
+id = "edge-arm-workers"
+arch = "arm64"
+memory_mb = 512
+cpus = 1.0
+
+[[regions.edge.infrastructure.rings.nodes]]
+name = "edge-worker"
+
+# --- Regione remota: regional (SIM_REGIONAL) ---
+
+[regions.regional]
+has_load_balancer = false
+offload_latency_s = 0.0
+
+[[regions.regional.infrastructure.rings]]
+id = "regional-arm"
+arch = "arm64"
+machine_tag = "arm64/gateway-arm/regional-arm"
+memory_mb = 512
+cpus = 1.0
+
+[[regions.regional.infrastructure.rings.nodes]]
+name = "regional-worker"
+
+# --- Regione remota: cloud (SIM_CLOUD) ---
+
+[regions.cloud]
+has_load_balancer = false
+offload_latency_s = 0.0
+
+[[regions.cloud.infrastructure.rings]]
+id = "cloud-arm"
+arch = "arm64"
+machine_tag = "arm64/archive-arm/cloud-arm"
+memory_mb = 512
+cpus = 1.0
+
+[[regions.cloud.infrastructure.rings.nodes]]
+name = "cloud-worker"

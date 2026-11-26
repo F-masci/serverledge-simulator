@@ -1,0 +1,124 @@
+name: serverledge-validation
+
+x-serverledge: &serverledge
+  image: serverledge-validation:local
+  build:
+    context: ${LAB_SERVERLEDGE_SOURCE:-../../../serverledge-infrascaler}
+    dockerfile: ${LAB_DOCKERFILE:-../serverledge-simulator/examples/validation/Dockerfile}
+  network_mode: host
+  init: true
+
+x-server: &server
+  <<: *serverledge
+  entrypoint: ["/bin/sh", "/lab/start-serverledge.sh"]
+  environment:
+    LAB_ETCD_ADDRESS: ${LAB_ETCD_ADDRESS:-etcd.serverledge.homelab.local:2379}
+  stop_signal: SIGINT
+
+x-worker: &worker
+  <<: *server
+  # On SELinux hosts, these workers need access to the host Docker socket.
+  security_opt:
+    - label=disable
+  volumes:
+    - ./config:/lab/config:ro,z
+    - ./start-serverledge.sh:/lab/start-serverledge.sh:ro,z
+    - ${LAB_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+  healthcheck:
+    test: ["CMD-SHELL", "curl -fsS --unix-socket /var/run/docker.sock http://localhost/_ping >/dev/null && curl -fsS http://127.0.0.1:$$LAB_HTTP_PORT/status >/dev/null"]
+    interval: 2s
+    timeout: 2s
+    retries: 30
+
+x-etcd: &etcd
+  LAB_ETCD_ADDRESS: ${LAB_ETCD_ADDRESS:-etcd.serverledge.homelab.local:2379}
+
+services:
+  etcd:
+    image: gcr.io/etcd-development/etcd:v3.5.13
+    profiles: [local-etcd]
+    network_mode: host
+    command:
+      - /usr/local/bin/etcd
+      - --name=s1
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://127.0.0.1:2379
+      - --advertise-client-urls=http://127.0.0.1:2379
+      - --listen-peer-urls=http://127.0.0.1:2380
+      - --initial-advertise-peer-urls=http://127.0.0.1:2380
+      - --initial-cluster=s1=http://127.0.0.1:2380
+      - --initial-cluster-token=serverledge-validation
+      - --initial-cluster-state=new
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  edge-1:
+    <<: *worker
+    command: [serverledge, /lab/config/edge-1.toml]
+    environment: { <<: *etcd, LAB_HTTP_PORT: "13300" }
+  edge-2:
+    <<: *worker
+    command: [serverledge, /lab/config/edge-2.toml]
+    environment: { <<: *etcd, LAB_HTTP_PORT: "13301" }
+  gateway:
+    <<: *worker
+    command: [serverledge, /lab/config/gateway.toml]
+    environment: { <<: *etcd, LAB_HTTP_PORT: "13302" }
+  archive:
+    <<: *worker
+    command: [serverledge, /lab/config/archive.toml]
+    environment: { <<: *etcd, LAB_HTTP_PORT: "13303" }
+  forwarder:
+    <<: *worker
+    command: [serverledge, /lab/config/forwarder.toml]
+    environment: { <<: *etcd, LAB_HTTP_PORT: "13304" }
+  relay:
+    <<: *worker
+    command: [serverledge, /lab/config/relay.toml]
+    environment: { <<: *etcd, LAB_HTTP_PORT: "13305" }
+  edge-worker:
+    <<: *worker
+    command: [serverledge, /lab/config/edge-worker.toml]
+    environment: { <<: *etcd, LAB_HTTP_PORT: "13306" }
+  regional-worker:
+    <<: *worker
+    command: [serverledge, /lab/config/regional-worker.toml]
+    environment: { <<: *etcd, LAB_HTTP_PORT: "13307" }
+  cloud-worker:
+    <<: *worker
+    command: [serverledge, /lab/config/cloud-worker.toml]
+    environment: { <<: *etcd, LAB_HTTP_PORT: "13308" }
+  lb:
+    <<: *server
+    command: [lb, /lab/config/lb.toml]
+    volumes:
+      - ./config:/lab/config:ro,z
+      - ./start-serverledge.sh:/lab/start-serverledge.sh:ro,z
+    depends_on:
+      edge-1:
+        condition: service_healthy
+      edge-2:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
+      archive:
+        condition: service_healthy
+      forwarder:
+        condition: service_healthy
+      relay:
+        condition: service_healthy
+      edge-worker:
+        condition: service_healthy
+      regional-worker:
+        condition: service_healthy
+      cloud-worker:
+        condition: service_healthy
+  cli:
+    <<: *serverledge
+    profiles: [tools]
+    entrypoint: [serverledge-cli]
+    volumes:
+      - ./workload.py:/lab/workload.py:ro,z

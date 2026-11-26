@@ -1,0 +1,99 @@
+# Scenario dimostrativo con autoscaler regionale PPO su due ring (x86 e ARM).
+seed = 12345
+primary_region = "edge"
+load_balancer = "RoundRobin"
+
+[scheduler.queue]
+capacity = 4
+
+[containers]
+idle_timeout = 5.0
+cleanup_interval = 1.0
+
+[containers.startup_times]
+"grussorusso/serverledge-python314" = 0.15
+
+[[functions]]
+name = "inference"
+runtime = "python314"
+memory_mb = 128
+cpu_demand = 1.0
+max_concurrency = 1
+supported_archs = ["amd64", "arm64"]
+first_arrival_time = 0.5
+arrival_rate = 3.0
+service_rate = 2.0
+
+[[functions]]
+name = "transform"
+runtime = "python314"
+memory_mb = 256
+cpu_demand = 0.5
+max_concurrency = 2
+supported_archs = ["amd64", "arm64"]
+first_arrival_time = 1.0
+arrival_rate = 2.0
+service_rate = 2.5
+
+[regions.edge.scaler]
+mode = "PPO"
+interval_s = 3.0
+history_length = 2
+
+[regions.edge.scaler.reward]
+w_k = 1.0
+w_t = 1.0
+k_ref = 0.01
+d_ref = 10.0
+timeout_penalty_s = 10.0
+
+[regions.edge.scaler.ppo]
+checkpoint_path = "checkpoints/ppo_edge"
+deterministic = true
+hidden_sizes = [64, 64]
+learning_rate = 0.0003
+gamma = 0.99
+gae_lambda = 0.95
+clip_epsilon = 0.2
+value_coef = 0.5
+entropy_coef = 0.01
+rollout_steps = 200
+ppo_epochs = 4
+minibatch_size = 50
+training = true
+
+[[regions.edge.infrastructure.rings]]
+id = "edge-x86"
+arch = "amd64"
+memory_mb = 512
+cpus = 2.0
+
+[regions.edge.infrastructure.rings.scaling]
+min_nodes = 1
+max_nodes = 4
+boot_time_s = 2.0
+shutdown_time_s = 0.0
+idle_power_w = 60.0
+max_power_w = 180.0
+boot_power_w = 90.0
+
+[[regions.edge.infrastructure.rings.nodes]]
+name = "x86-1"
+
+[[regions.edge.infrastructure.rings]]
+id = "edge-arm"
+arch = "arm64"
+memory_mb = 512
+cpus = 2.0
+
+[regions.edge.infrastructure.rings.scaling]
+min_nodes = 0
+max_nodes = 4
+boot_time_s = 1.5
+shutdown_time_s = 0.0
+idle_power_w = 25.0
+max_power_w = 75.0
+boot_power_w = 40.0
+
+[[regions.edge.infrastructure.rings.nodes]]
+name = "arm-1"

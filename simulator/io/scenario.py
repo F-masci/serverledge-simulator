@@ -13,7 +13,7 @@ from simulator.model.execution.function import Function, FunctionProfile
 from simulator.model.execution.runtime import BuiltinRuntime, CustomRuntime, Runtime
 from simulator.model.scheduling.load_balancer import LoadBalancerMode
 from simulator.random.streams import RandomStreams
-from simulator.utils.validation import nonempty_string, nonnegative_integer, positive_integer
+from simulator.utils.validation import nonempty_string, nonnegative_integer, positive_integer, positive_number
 
 from .execution import _ContainersConfig, _InvocationConfig, _SchedulerConfig
 from .functions import _FunctionConfig
@@ -33,6 +33,8 @@ class Scenario:
     invocation: _InvocationConfig
     load_balancer: LoadBalancerMode
     load_balancer_replicas: int | None
+    load_balancer_resource_cache: bool
+    load_balancer_refresh_interval_s: float
     scaler: ScalerConfig
     seed: int = 12345
 
@@ -44,6 +46,8 @@ class Scenario:
         scheduler: Mapping[str, object] | None = None,
         load_balancer: LoadBalancerMode | str = LoadBalancerMode.ARCHITECTURE_UNAWARE,
         load_balancer_replicas: int | None = None,
+        load_balancer_resource_cache: bool = True,
+        load_balancer_refresh_interval_s: float = 30.0,
         scaler: ScalerConfig | Mapping[str, object] | str | None = None,
         invocation: Mapping[str, object] | None = None,
         regions: Mapping[str, object] | None = None,
@@ -66,6 +70,11 @@ class Scenario:
             else None
         )
         object.__setattr__(self, 'load_balancer_replicas', replicas)
+        if not isinstance(load_balancer_resource_cache, bool):
+            raise ValueError('load_balancer_resource_cache deve essere un booleano')
+        object.__setattr__(self, 'load_balancer_resource_cache', load_balancer_resource_cache)
+        refresh_interval = positive_number(load_balancer_refresh_interval_s, 'load_balancer_refresh_interval_s')
+        object.__setattr__(self, 'load_balancer_refresh_interval_s', refresh_interval)
         scaler_config = ScalerConfig.parse(scaler)
         object.__setattr__(self, 'scaler', scaler_config)
         scheduler_config = _SchedulerConfig.parse(scheduler)
@@ -202,7 +211,8 @@ class Scenario:
         if not isinstance(data, dict):
             raise ValueError('Lo scenario deve essere una tabella')
         allowed = {'functions', 'function', 'seed', 'infrastructure', 'containers', 'scheduler',
-                   'load_balancer', 'load_balancer_replicas', 'scaler', 'invocation', 'regions', 'primary_region'}
+                   'load_balancer', 'load_balancer_replicas', 'load_balancer_resource_cache',
+                   'load_balancer_refresh_interval_s', 'scaler', 'invocation', 'regions', 'primary_region'}
         if unknown := data.keys() - allowed:
             raise ValueError(f'Parametri scenario sconosciuti: {sorted(map(str, unknown))}')
 
@@ -221,6 +231,8 @@ class Scenario:
             scheduler=data.get('scheduler'),
             load_balancer=data.get('load_balancer', LoadBalancerMode.ARCHITECTURE_UNAWARE),
             load_balancer_replicas=data.get('load_balancer_replicas'),
+            load_balancer_resource_cache=data.get('load_balancer_resource_cache', True),
+            load_balancer_refresh_interval_s=data.get('load_balancer_refresh_interval_s', 30.0),
             scaler=data.get('scaler'),
             invocation=data.get('invocation'),
             regions=data.get('regions'),
@@ -257,6 +269,8 @@ class Scenario:
             'invocation': self.invocation,
             'load_balancer': self.load_balancer,
             'load_balancer_replicas': self.load_balancer_replicas,
+            'load_balancer_resource_cache': self.load_balancer_resource_cache,
+            'load_balancer_refresh_interval_s': self.load_balancer_refresh_interval_s,
             'scaler': self.scaler,
             'seed': self.seed,
         }
