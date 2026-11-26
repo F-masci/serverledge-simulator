@@ -5,11 +5,16 @@
 # Cache Python
 __pycache__/
 
-# Coverage
+# Coverage & Mutation Testing
 .coverage
 .coverage.*
 coverage.xml
 htmlcov/
+mutants/
+.mutmut-cache
+mutation-issues.json
+mutation-report.json
+mutation-report.md
 
 # Configurazione locale e credenziali
 .env

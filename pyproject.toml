@@ -1,0 +1,18 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.mutmut]
+source_paths = [
+    "simulator/core/engine.py",
+    "simulator/model/execution/container.py",
+    "simulator/model/execution/pool.py",
+    "simulator/model/topology/node.py",
+    "simulator/model/topology/ring.py",
+    "simulator/model/scheduling/load_balancer.py",
+    "simulator/model/scheduling/offloading.py",
+    "simulator/utils/machine_tag.py",
+    "simulator/utils/welford.py",
+]
+pytest_add_cli_args_test_selection = ["tests", "--ignore=tests/test_scaler.py"]
+also_copy = ["simulator", "scaler", "trainer", "examples"]
